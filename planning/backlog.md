@@ -14,7 +14,7 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 
 ## P0 — Engineering foundation
 - [x] SEC-010 Create repo structure and contributor/agent rules. (README, docs/00, .gitignore)
-- [x] SEC-011 Add CI formatting, lint, tests, secret scanning. (`.github/workflows/ci.yml`: ruff + pytest + tsc build; secret scan = gitleaks step pending SEC-062 hardening pass — first Actions run on push)
+- [x] SEC-011 Add CI formatting, lint, tests, secret scanning. (`.github/workflows/ci.yml`: gitleaks full-history scan (config `gitleaks.toml`, synthetic-data allowlist) + ruff + pytest + tsc build)
 - [x] SEC-012 Create ADRs for framework, auth, SIEM, data, secrets. (docs/adr/001–007)
 - [x] SEC-013 Define API conventions, schemas, error model, audit format. (docs/12, ADR-004)
 
@@ -40,7 +40,7 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 - [ ] SEC-040 Isolated networks and flow matrix. (Design complete — docs/03; host-side firewall/zone enforcement is a target-host task, not exercisable in the sandbox)
 - [x] SEC-041 Health checks, logs, metrics, resource limits. (`/api/healthz`, `/metrics`, uvicorn logs; limits = single-process, documented)
 - [x] SEC-042 Backup automation and demonstrated restore. (API-triggered backup w/ sha256; restore with typed confirm; round-trip tested — scheduled cron left to ops, P3)
-- [ ] SEC-043 Capacity/load test with expected event volume. (Explicitly not done — docs/13 limitation)
+- [x] SEC-043 Capacity/load test with expected event volume. (`scripts/load_test.py`: 3.9k ev/s @20k, 6.7k ev/s @50k in-process; `tests/test_capacity.py` fast-suite floor; live-uvicorn http mode pending)
 - [x] SEC-044 Local deployment/rollback runbook. (docs/08, docs/10)
 
 ## P2 — AI and advanced modules

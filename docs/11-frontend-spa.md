@@ -59,5 +59,5 @@ The backend serves `dist/` automatically when it exists
 
 The frontend is typechecked + built in CI (`npm run build` runs
 `tsc -b`). Behavioral coverage of the APIs it calls comes from the
-backend suite (96 tests, `app/backend/tests/`); manual E2E flows are
+backend suite (97 tests, `app/backend/tests/`); manual E2E flows are
 recorded in docs/13.

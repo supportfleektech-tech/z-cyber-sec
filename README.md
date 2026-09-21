@@ -1,7 +1,7 @@
 # CYBER-SEC — Cybersecurity Engineering & Intelligence Lab
 
 **Status:** Implemented v1.0 (modular monolith + React SPA), local-first, zero-budget.
-**Verified:** 96/96 backend tests, ruff clean, SPA builds + served, live smoke checks —
+**Verified:** 97/97 backend tests, ruff clean, SPA builds + served, live smoke checks —
 see `docs/13-verification-evidence.md` for the full evidence log (commands, timestamps, limitations).
 
 > All data in this repository and its default runtime is **synthetic**
@@ -58,7 +58,7 @@ app/backend/
                          # backup, policy, report builder
   app/migrations/        # 0001_init.sql (full schema)
   app/seed/              # synthetic demo data (explicitly labeled)
-  tests/                 # 96 tests: auth, RBAC, detection, intel, agents, e2e, ...
+  tests/                 # 97 tests: auth, RBAC, detection, intel, agents, e2e, ...
 app/frontend/            # React 18 + TS + Vite SPA (13 pages; served by backend)
 docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence
 docs/adr/                # 001–007 architecture decisions
@@ -87,7 +87,7 @@ infra/                   # compose profiles & network design (target-host phase)
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q     # 96 tests
+cd app/backend && .venv/bin/python -m pytest -q     # 97 tests
 cd app/backend && .venv/bin/ruff check app/         # lint
 cd app/frontend && npm run build                    # tsc -b && vite build
 ```

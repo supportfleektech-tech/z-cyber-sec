@@ -1,0 +1,31 @@
+# Gitleaks config — CYBER-SEC
+# Default rules apply; allowlisted paths contain ONLY synthetic, explicitly
+# documented lab credentials (never real secrets — see ADR-006).
+title = "cybersec gitleaks config"
+
+[allowlist]
+description = "Synthetic lab data and placeholder examples"
+paths = [
+  '''\.env\.example''',
+  '''app/backend/app/seed/.*''',
+  '''app/backend/tests/.*''',
+  '''docs/.*''',
+  '''README\.md''',
+  '''.github/.*''',
+  '''package-lock\.json''',
+]
+# Low-entropy demo/placeholder values that trip generic key/password rules
+stopwords = [
+  "cybersecadmin1!",
+  "change-me",
+  "changeme",
+  "dev-only-change-me-in-staging",
+  "synthetic",
+  "example",
+  "placeholder",
+  "testpass",
+  "password123",
+  "secret123",
+  "dummypass",
+  "wrongpass",
+]

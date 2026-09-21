@@ -1,5 +1,6 @@
 # CYBER-SEC CI baseline — zero-budget: GitHub Actions free tier, open-source toolchain only.
-# Jobs: backend (ruff + pytest), frontend (tsc build). Both must pass for a green branch.
+# Jobs: secrets (gitleaks), backend (ruff + pytest), frontend (tsc build).
+# All must pass for a green branch.
 name: ci
 
 on:
@@ -12,6 +13,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: secrets — gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scan full history, not just HEAD
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: ./gitleaks.toml
+          GITLEAKS_EXIT_CODE: "1"
+
   backend:
     name: backend — ruff + pytest
     runs-on: ubuntu-latest

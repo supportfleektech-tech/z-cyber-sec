@@ -20,14 +20,9 @@ reported** (observed in an earlier turn, re-check before relying),
 
 ```
 $ cd app/backend && .venv/bin/python -m pytest
+97 passed, 4 warnings in 67.05s (0:01:07)     # 2026-09-21 ~05:22 UTC (post capacity test added)
+96 passed, 4 warnings in 83.52s (0:01:23)     # 2026-09-21 ~04:19 UTC (post ruff E741 fix)
 96 passed, 4 warnings in 83.80s (0:01:23)     # 2026-09-21 ~04:15 UTC (pre-ruff-fix run)
-```
-Ruff fix applied ~04:16 UTC (grc.py E741). Post-fix confirmation runs:
-
-```
-$ .venv/bin/python -m pytest -q        # ~04:17 UTC: exit 0, 96/96 progress dots, no F/E
-$ .venv/bin/python -m pytest -v
-================== 96 passed, 4 warnings in 83.52s (0:01:23) ===================   # ~04:19 UTC
 ```
 Also **Previously reported**: 4 consecutive green runs of 96/96 before the
 `intel.py` status-patch change; the runs above are the post-change
@@ -85,6 +80,33 @@ $ curl -s -b <jar> localhost:8080/api/overview/stats
   `{"id":1,"path":".../data/reports/overview-1.html","input_rows":349,
    "input_sha256":"47830bfa4a5cfbb00e0f2a543c051ba123d693e97dbed3d627cdfc1d5a02d8cd"}`
 
+## Capacity / load test (SEC-043) — Verified, 2026-09-21 ~05:20 UTC
+
+`app/backend/scripts/load_test.py` drives the real ASGI app (API + detection
+engine + SQLite) with a synthetic stream (~85% benign + concentrated SSH
+brute-force / login-storm patterns so detection work is representative).
+Runs use a throwaway data dir and a runtime-generated load-test user (no
+credential literals in source, ADR-006).
+
+```
+$ .venv/bin/python -m scripts.load_test --events 20000 --batch 250   # → GATE: PASS
+events_per_second: 3903.2    batch p50 64ms / p95 97ms / p99 134ms / max 134ms
+detections_fired: 251 (→ 8 alerts after per-rule/entity dedupe)
+db_size_bytes: 360448 → 6082560   (~275 B/event incl. WAL)
+
+$ .venv/bin/python -m scripts.load_test --events 50000 --batch 500   # → GATE: PASS
+events_per_second: 6722.4    batch p50 72ms / p95 107ms / max 112ms
+db_size_bytes: 360448 → 14548992
+```
+
+- Bounded regression guard in the fast suite: `tests/test_capacity.py`
+  (2,000 events / 8 batches, <20s floor, detection must fire) — 1.05s
+  locally, part of the 97-test run.
+- `--mode http` measures a live server end-to-end (needs
+  `LOAD_TEST_USER` / `LOAD_TEST_PASSWORD` env vars); not run here.
+- Single-process, single-core-equivalent, in-process (no uvicorn network
+  hop); the in-process ceiling, not the network ceiling, is measured.
+
 ## CI on GitHub Actions — Verified (2026-09-21 ~04:22 UTC)
 
 First run of `.github/workflows/ci.yml` (PR #1, run 35560868111):
@@ -95,8 +117,9 @@ First run of `.github/workflows/ci.yml` (PR #1, run 35560868111):
 Push and pull_request triggers both fired; both green.
 
 ## Known limitations & blocked items
-- **Load/capacity test (SEC-043)**: not performed; SQLite in-process
-  engine limits are estimated, not measured.
+- **Capacity (SEC-043)**: measured in-process (see section above); a
+  live-uvicorn `--mode http` run and multi-client concurrency are not yet
+  exercised.
 - **Restore rehearsal under load (SEC-063)**: backup/restore round-trip is
   covered by tests; a timed RTO/RPO rehearsal is **Proposed** (Phase 8).
 - **Production deployment (ADR-007)**: all swap boundaries documented, none
@@ -110,3 +133,7 @@ Push and pull_request triggers both fired; both green.
   `node_modules`, `dist`); recovery is documented in this file's
   environment section and takes < 5 minutes (venv + pip install +
   `npm install && npm run build` + `python -m app.seed.seed_demo`).
+  Happened twice (03:48 and 05:07 UTC); the second also reset the local
+  branch pointer to the base commit — fixed with
+  `git fetch origin <branch> && git reset --soft FETCH_HEAD`
+  (working tree untouched), verified via `git status` before continuing.
