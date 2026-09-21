@@ -177,15 +177,33 @@ New/changed files: `app/backend/app/middleware.py` (NEW),
 `docs/{09-production,12-api-reference,13-verification-evidence}.md`,
 `infra/README.md`, `planning/backlog.md` (44/44), `README.md` (docs index).
 
+## SEC-063 live-mode drill — Verified, 2026-09-21 ~08:10 UTC
+
+Live mode of `scripts/backup_rehearsal.py` executed against the real
+preview server (real uvicorn stop/start):
+
+- `--url http://127.0.0.1:8080 --restart-cmd ".venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080"`
+- **DRILL: PASS** — backup `cybersec-20260921T08092.tar.gz` (sha256
+  verified), server SIGTERMed, live DB files moved to `data.lost-1789978185`
+  (preserved), production `restore_from` applied, server restarted
+  (`start_new_session` so it outlives the drill), **423/423 events** match,
+  audit chain ok both sides, **RTO 16.68s** (real stop+restore+start).
+- Post-drill live check: 423 events, both release decisions present, gate
+  `approved`, chain verify ok (41 rows).
+
+Bugs found & fixed by the live run: `httpx.Client(base_url=…)` (0.28.x
+keyword-only API), and `pgrep -f uvicorn` matching the drill's own argv
+(self-kill) → replaced with a /proc cmdline scan that excludes the drill
+process + its ancestor chain.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: measured in-process (see section above); a
   live-uvicorn `--mode http` run and multi-client concurrency are not yet
   exercised.
-- **Restore rehearsal (SEC-063)**: in-process drill PASSes (backup → wipe →
-  production restore → 342/342 events + chain intact, RTO 0.01s). The **live**
-  mode (real uvicorn stop/start + `--restart-cmd`) is coded but unrun in this
-  sandbox (needs a live server + server-control env); treat live RTO as
-  **Proposed**.
+- **Restore rehearsal (SEC-063)**: **both modes verified** — in-process
+  (342/342, RTO 0.01s) and live (423/423, RTO 16.68s, real server
+  stop/start). Live-mode RTO on this host, small dataset; production RTO
+  scales with DB size (see ADR-005/007).
 - **Production deployment (ADR-007)**: compose/Caddyfile/env templates +
   Dockerfile + supply-chain CI now exist; the actual staging/production
   bring-up is **Proposed** (roadmap Phases 8–9) — not exercised here.

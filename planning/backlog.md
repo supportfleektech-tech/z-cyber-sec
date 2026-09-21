@@ -56,7 +56,7 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 - [x] SEC-060 Provision separate staging. (`infra/staging/` compose + env: separate volume/network/secret, HTTP-only on staging LAN, same image as prod, synthetic-labeled; actual host provisioning = ops task)
 - [x] SEC-061 Production secrets, TLS, ingress, access controls. (Boot guard; Caddy ACME TLS + rate limit + security headers; `ForwardedHeadersMiddleware` → Secure cookie + real client IP behind the edge; env templates. Actual deployment = ops task on the target host)
 - [x] SEC-062 SBOM, dependency/image scanning, release provenance. (CI `supply-chain` job: CycloneDX SBOM from pinned requirements + pip-audit + npm audit; gitleaks secret scan; image scan/signed releases = Proposed for the registry stage)
-- [x] SEC-063 RTO/RPO, backup isolation, restore/rollback rehearsal. (`scripts/backup_rehearsal.py`: in-process drill PASS (wipe → production restore → 342/342 events, chain intact, RTO 0.01s); live uvicorn stop/start mode coded, unrun in sandbox)
+- [x] SEC-063 RTO/RPO, backup isolation, restore/rollback rehearsal. (`scripts/backup_rehearsal.py`: in-process drill PASS (342/342, RTO 0.01s) AND live drill PASS (real uvicorn stop/start: 423/423 events, chain intact, RTO 16.68s; lost files preserved in data.lost-*)
 - [x] SEC-064 Production acceptance and human release approval. (Release gate built: `POST/GET /api/admin/releases` + `/latest` gate view (admin-only, audit-chained, append-only) + Admin UI + `docs/14` checklist. The human approval act itself is recorded at deploy time by an admin — the platform enforces the gate, it does not simulate the human)
 
 ## P3 — Optimization

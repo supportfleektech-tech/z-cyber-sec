@@ -38,11 +38,53 @@ def _auth_headers_client(url: str):
     import httpx
     user = os.environ.get("LOAD_TEST_USER", "admin")
     pw = os.environ.get("LOAD_TEST_PASSWORD", "")
-    c = httpx.Client(url, timeout=120)
+    c = httpx.Client(base_url=url, timeout=120)
     r = c.post("/api/auth/login", json={"username": user, "password": pw})
     if r.status_code != 200:
         raise SystemExit("login failed — set LOAD_TEST_PASSWORD (and LOAD_TEST_USER if not admin)")
     return c
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _server_pids() -> list[int]:
+    """PIDs running the app server (uvicorn app.main:app), found via /proc.
+
+    pgrep -f is NOT used: the drill's own argv (and any wrapping shell)
+    contains the restart command text and would match, making the drill
+    kill itself. Instead, scan /proc cmdlines for the server markers and
+    exclude this process plus its full ancestor chain.
+    """
+    exclude = set()
+    pid = os.getpid()
+    while pid > 1:
+        exclude.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+        if ppid <= pid:
+            break
+        pid = ppid
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmd = f.read().decode(errors="replace").replace("\0", " ")
+        except OSError:
+            continue
+        if "uvicorn" in cmd and "app.main:app" in cmd and int(entry) not in exclude:
+            pids.append(int(entry))
+    return pids
 
 
 def _chain_ok(c) -> bool:
@@ -72,9 +114,18 @@ def rehearse(url: str | None, restart_cmd: str | None) -> dict:
         # 4. simulate loss (requires server control)
         if restart_cmd:
             t_loss = time.monotonic()
-            for p in subprocess.run(["pgrep", "-f", "uvicorn"], capture_output=True).stdout.split():
-                os.kill(int(p), signal.SIGTERM)
-            time.sleep(2)
+            server_pids = _server_pids()
+            if not server_pids:
+                raise SystemExit("no server process found (expected 'uvicorn app.main:app')")
+            for p in server_pids:
+                os.kill(p, signal.SIGTERM)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and any(_alive(p) for p in server_pids):
+                time.sleep(0.2)
+            for p in server_pids:  # escalate if SIGTERM was ignored
+                if _alive(p):
+                    os.kill(p, signal.SIGKILL)
+            time.sleep(1)
             data_dir = Path(os.environ.get("DATA_DIR", HERE / "data"))
             lost = data_dir.parent / (data_dir.name + f".lost-{int(time.time())}")
             lost.mkdir(parents=True, exist_ok=True)
@@ -88,8 +139,11 @@ def rehearse(url: str | None, restart_cmd: str | None) -> dict:
         from app.services import backup as backup_svc
         backup_svc.restore_from(path, {"type": "system", "id": None, "name": "drill"})
         if restart_cmd:
+            # start_new_session: the server must survive the drill process
+            # exiting (and any process-group cleanup the caller's shell does).
             subprocess.Popen(restart_cmd.split(), cwd=str(HERE),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
         for _ in range(120):
             try:
                 if c.get("/api/healthz", timeout=2).status_code == 200:

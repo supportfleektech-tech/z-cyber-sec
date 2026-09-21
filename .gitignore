@@ -32,3 +32,6 @@ coverage/
 # Generated test data + tsc incremental info
 app/backend/tests/.testdata/
 *.tsbuildinfo
+
+# Backup drill: "lost" data sets moved aside during restore rehearsals (SEC-063)
+app/backend/data.lost-*/
