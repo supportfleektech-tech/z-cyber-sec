@@ -85,11 +85,16 @@ $ curl -s -b <jar> localhost:8080/api/overview/stats
   `{"id":1,"path":".../data/reports/overview-1.html","input_rows":349,
    "input_sha256":"47830bfa4a5cfbb00e0f2a543c051ba123d693e97dbed3d627cdfc1d5a02d8cd"}`
 
-## Known limitations & blocked items
+## CI on GitHub Actions — Verified (2026-09-21 ~04:22 UTC)
 
-- **CI workflow** (`.github/workflows/ci.yml`) added this turn but **not yet
-  executed on GitHub Actions** — first run happens on push; treat as
-  **Proposed until the check is green**.
+First run of `.github/workflows/ci.yml` (PR #1, run 35560868111):
+
+- `backend — ruff + pytest`: **pass** (1m19s)
+- `frontend — typecheck + build`: **pass** (25s)
+
+Push and pull_request triggers both fired; both green.
+
+## Known limitations & blocked items
 - **Load/capacity test (SEC-043)**: not performed; SQLite in-process
   engine limits are estimated, not measured.
 - **Restore rehearsal under load (SEC-063)**: backup/restore round-trip is
