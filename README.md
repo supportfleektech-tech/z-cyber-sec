@@ -117,7 +117,8 @@ and frontend job (typecheck + build) on every push/PR.
 | [11](docs/11-frontend-spa.md) | Frontend SPA |
 | [12](docs/12-api-reference.md) | API reference (all endpoints, error model, audit) |
 | [13](docs/13-verification-evidence.md) | Verification & evidence log |
-| [ADR 001–007](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production |
+| [14](docs/14-release-checklist.md) | Release checklist & human approval gate (SEC-064) |
+| [ADR 001–008](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production, capacity/extraction |
 
 Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·
 Backlog: [`planning/backlog.md`](planning/backlog.md)

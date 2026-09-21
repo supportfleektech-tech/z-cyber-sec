@@ -99,7 +99,7 @@ def token_ttl_seconds() -> int:
 ALL_READ = {
     "overview.read", "soc.read", "cases.read", "intel.read", "vulns.read",
     "appsec.read", "cloud.read", "grc.read", "exercises.read", "reports.read",
-    "assets.read", "agents.read", "automation.read",
+    "assets.read", "agents.read", "automation.read", "release.read",
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -120,7 +120,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "grc.write", "exercises.write", "reports.generate", "assets.write",
         "automation.write", "automation.run", "agents.manage", "agents.approve",
         "agents.task", "rules.write", "admin.users", "admin.integrations",
-        "admin.flags", "admin.backup", "audit.read",
+        "admin.flags", "admin.backup", "audit.read", "release.write",
     },
     # Machine identity used by the agent gateway. Minimal, audited scope.
     "agent_service": {"agents.read", "agents.task"},

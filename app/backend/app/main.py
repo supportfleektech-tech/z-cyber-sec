@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import raw_connection
+from .middleware import ForwardedHeadersMiddleware
 from .routers import (
     admin,
     agents,
@@ -44,6 +45,11 @@ def create_app() -> FastAPI:
                   description="Local-first cybersecurity lab & operations platform. "
                               "Synthetic data by default; environment labeled.",
                   docs_url="/api/docs", openapi_url="/api/openapi.json")
+
+    # One terminating proxy hop (Caddy, SEC-061): forwarded headers make the
+    # scheme https (Secure session cookie) and the client IP real (login
+    # attribution). Locally (no proxy) headers are absent → unchanged.
+    app.add_middleware(ForwardedHeadersMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

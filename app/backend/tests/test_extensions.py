@@ -5,9 +5,9 @@ import json
 import sys
 import textwrap
 
-from app.services import agent_adapters
 from test_rbac import PASSWORDS
 
+from app.services import agent_adapters
 
 # ------------------------------------------------------------- purple team
 
@@ -125,7 +125,6 @@ def test_report_schedules_lifecycle(client, conn):
 # ------------------------------------------------------------- retention report
 
 def test_retention_report_flags_due_items(client, conn):
-    from app import db
     old = "2000-01-02T03:04:05Z"
     conn.execute(
         "INSERT INTO evidence (case_id, name, path, sha256, size, classification, retention, uploaded_by, created_at) "
@@ -267,3 +266,70 @@ def test_agents_list_decodes_adapter_fields(client):
     row = next(i for i in items if i["name"] == "dec-1")
     assert row["adapter"] == "openai_compat"
     assert row["adapter_config"]["base_url"] == "http://x/v1"
+
+# ----------------------------------------------------------------- release gate
+# SEC-064: human release approval — admin-only, bound to commit + checklist
+# sha256, append-only, audited; gate view drives rollout decisions.
+
+_FAKE_SHA = "a" * 64
+_FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _as(client, username):
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/login", json={"username": username, "password": PASSWORDS[username]})
+    assert r.status_code == 200
+
+
+def test_release_gate_requires_admin(client, conn):
+    _as(client, "sasha")  # soc_analyst: no release.write
+    r = client.post("/api/admin/releases",
+                    json={"version": "1.1.0", "commit_sha": _FAKE_COMMIT,
+                          "checklist_sha256": _FAKE_SHA, "decision": "approved"})
+    assert r.status_code == 403
+
+    # gate is readable (release.read is a read perm)
+    r = client.get("/api/admin/releases/latest")
+    assert r.status_code == 200
+    assert r.json()["gate"] == "no_decision"
+
+
+def test_release_decision_recorded_and_gates_rollout(client, conn):
+    # A rejection first: gate must read blocked, and the decision is audited.
+    r = client.post("/api/admin/releases",
+                    json={"version": "1.1.0-rc1", "commit_sha": _FAKE_COMMIT,
+                          "checklist_sha256": _FAKE_SHA, "decision": "rejected",
+                          "comment": "drill failed"})
+    assert r.status_code == 201, r.text
+    gate = client.get("/api/admin/releases/latest").json()
+    assert gate["gate"] == "blocked"
+    assert gate["latest"]["decision"] == "rejected"
+
+    rows = conn.execute("SELECT * FROM audit_events WHERE action = 'release.rejected'").fetchall()
+    assert len(rows) == 1
+
+    # Then approval for the final build: gate flips to approved.
+    r = client.post("/api/admin/releases",
+                    json={"version": "1.1.0", "commit_sha": _FAKE_COMMIT,
+                          "checklist_sha256": _FAKE_SHA, "decision": "approved",
+                          "comment": "all gates green"})
+    assert r.status_code == 201, r.text
+    gate = client.get("/api/admin/releases/latest").json()
+    assert gate["gate"] == "approved"
+    assert gate["latest"]["version"] == "1.1.0"
+    assert gate["latest"]["decided_by"] == "admin"
+
+    # History lists both, newest first
+    items = client.get("/api/admin/releases").json()["items"]
+    assert [i["decision"] for i in items] == ["approved", "rejected"]
+
+    # Validation: bad commit sha / short sha / bad decision rejected
+    assert client.post("/api/admin/releases",
+                       json={"version": "1.2.0", "commit_sha": "XYZ",
+                             "checklist_sha256": _FAKE_SHA, "decision": "approved"}).status_code == 422
+    assert client.post("/api/admin/releases",
+                       json={"version": "1.2.0", "commit_sha": _FAKE_COMMIT,
+                             "checklist_sha256": "abc", "decision": "approved"}).status_code == 422
+    assert client.post("/api/admin/releases",
+                       json={"version": "1.2.0", "commit_sha": _FAKE_COMMIT,
+                             "checklist_sha256": _FAKE_SHA, "decision": "maybe"}).status_code == 422

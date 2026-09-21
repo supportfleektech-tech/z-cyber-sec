@@ -146,6 +146,37 @@ New/changed files: `app/backend/app/migrations/0002_extensions.sql`,
 `app/frontend/src/{api.ts,pages/{Soc,Reports,Agents}.tsx}`,
 `docs/{12-api-reference,13-verification-evidence}.md`, `gitleaks.toml`.
 
+## SEC-060/061/064/070 completion block — Verified, 2026-09-21 ~07:30 UTC
+
+Environment: same sandbox, backend venv (py3.11), branch
+`arena/01a0c152-z-cyber-sec`.
+
+| Item | Command | Result |
+|---|---|---|
+| Lint | `ruff check app/ scripts/ tests/` | All checks passed |
+| Full test suite | `pytest -q` | **115 passed** (110 prior + 2 forwarded-headers + 2 release-gate + 1 boot-guard), exit 0, ~88s |
+| SEC-061 boot guard hardened (self-caught footgun) | new test `test_boot_guard_rejects_placeholder_secrets` | The guard only rejected the dev default — an operator copying `.env.example` unedited would boot on `__SET__`. Now STAGING/PROD also reject template placeholders + keys <32 chars (ADR-006 updated; LOCAL stays permissive) |
+| Backup rehearsal | `python -m scripts.backup_rehearsal` (in-process) | **DRILL: PASS** — 342/342 events, sha256 ok, chain ok both sides, RTO 0.01s |
+| Frontend build | `npm run build` | `tsc -b && vite build` ✓ 50 modules, `dist/assets/index-yPnJV00W.js` 274.36 kB (gzip 76.89 kB) |
+| SEC-061 edge trust (real bug found & fixed) | new `app/middleware.py` `ForwardedHeadersMiddleware` + 2 tests | The installed starlette build (1.6.0) ships **no** `ProxyHeadersMiddleware` — a naive `request.url.scheme` would never be `https` behind Caddy (no Secure cookie, client IP = proxy). Middleware implements one-hop trust (X-Forwarded-Proto → scheme; last XFF entry / X-Real-IP → client). Tests: cookie gains `Secure` behind edge + session records `198.51.100.7` (forged leading XFF entries ignored); direct connection keeps local behavior (no Secure, `testclient` IP) |
+| SEC-064 release gate (live smoke) | cookie-authed probes on :8080 after restart (migration 0003 auto-applied) | gate `no_decision` → record `rejected` (201) → gate `blocked` → record `approved` (201) → gate `approved` (v1.1.0); history `['approved','rejected']`; sasha (soc_analyst) record → **403**; bad commit sha → 422; audit rows `release.approved`/`release.rejected` present; chain verify ok (35 rows) |
+| SEC-061 Secure cookie (live smoke) | login with `X-Forwarded-Proto: https` | Set-Cookie contains `secure` ✓ |
+| SPA | `GET /` | serves rebuilt bundle `index-yPnJV00W.js` |
+| Compose/YAML | python yaml parse + `bash -n` | `infra/staging/docker-compose.yml`, `infra/prod/docker-compose.yml`, `infra/compose/compose.yaml` valid; `validate_flows.sh` syntax OK |
+| Docker image build | `docker build` | **Proposed/unrun** — no docker daemon in sandbox (COPY paths verified to exist) |
+| CI | pending this block's push | — |
+
+New/changed files: `app/backend/app/middleware.py` (NEW),
+`app/backend/app/migrations/0003_releases.sql` (NEW),
+`app/backend/app/{main,security,config}.py` (middleware registration; `release.read`/`release.write` perms; boot-guard hardening),
+`app/backend/app/routers/admin.py` (releases endpoints),
+`app/backend/tests/{test_security,test_extensions}.py` (+4 tests; +2 ruff auto-fixes in test_capacity.py),
+`app/frontend/src/pages/Admin.tsx` (Releases tab),
+`infra/staging/{docker-compose.yml,.env.example}` (NEW, SEC-060),
+`docs/14-release-checklist.md` (NEW), `docs/adr/008-capacity-based-extraction.md` (NEW, SEC-070 decision),
+`docs/{09-production,12-api-reference,13-verification-evidence}.md`,
+`infra/README.md`, `planning/backlog.md` (44/44), `README.md` (docs index).
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: measured in-process (see section above); a
   live-uvicorn `--mode http` run and multi-client concurrency are not yet

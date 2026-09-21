@@ -149,6 +149,9 @@ are safe; at-most-once-per-interval by design.
 | `POST /backup` | Consistent backup → `{path, sha256, ...}` |
 | `POST /backup/restore` | `{path, confirm:"RESTORE"}`; path must be under `data/backups` |
 | `GET /retention/report` | Evidence retention **report only** (SEC-072, ADR-005): per-item `within_retention`/`due` + `legal_hold` (case-bound) flags; never deletes — deletion stays a human, audited act |
+| `POST /releases` | Record a human release decision (SEC-064): `{version, commit_sha, checklist_sha256 (64-hex), decision: approved\|rejected, comment?}` — admin only (`release.write`), audit-logged |
+| `GET /releases` | Decision history (paginated, newest first) |
+| `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
 ## Audit format
 

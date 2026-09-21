@@ -64,11 +64,16 @@ def load_settings() -> Settings:
     s.token_ttl_hours = int(os.environ.get("TOKEN_TTL_HOURS", s.token_ttl_hours))
     s.dev_origin = os.environ.get("DEV_ORIGIN") or None
     s.ensure_dirs()
-    if s.env_name in {"STAGING", "PROD"} and s.secret_key == "dev-only-change-me-in-staging":
-        raise RuntimeError(
-            "SECRET_KEY must be set to a strong unique value when ENV_NAME is STAGING or PROD "
-            "(see ADR-006). Refusing to boot with the dev default."
-        )
+    if s.env_name in {"STAGING", "PROD"}:
+        # ADR-006 boot guard, hardened: no "it works, remember to change it
+        # later" path. Refuse the dev default, unedited template placeholders,
+        # and anything too short to carry real entropy.
+        if s.secret_key in {"", "dev-only-change-me-in-staging", "__SET__", "changeme", "change-me"} \
+                or len(s.secret_key) < 32:
+            raise RuntimeError(
+                "SECRET_KEY must be a strong unique value (>=32 chars, e.g. `openssl rand -hex 32`) "
+                "when ENV_NAME is STAGING or PROD (see ADR-006). Refusing to boot."
+            )
     return s
 
 

@@ -6,7 +6,8 @@ Zero-budget, local-first. Three layers, from least to most hardened:
 |---|---|---|
 | Local dev | `infra/compose/compose.yaml` | Single container, host port 8080, named volume for `data/`. For day-to-day. |
 | Target-host network | `infra/network/` | nftables flow matrix (mgmt/app/lab-targets zones) + validator. Applied **on the target host only**. |
-| Staging/prod | `infra/prod/` | Docker image + Caddy TLS edge + hardened env. Built, not yet deployed (ADR-007). |
+| Staging | `infra/staging/` | Separate stack (own volume + network), HTTP-only on the staging LAN, same image as prod. Acceptance environment (SEC-060). |
+| Production | `infra/prod/` | Docker image + Caddy TLS edge + hardened env. Built, not yet deployed (ADR-007). |
 
 ## 1. Local dev compose
 
@@ -38,7 +39,31 @@ sudo infra/network/validate_flows.sh     # PASS/FAIL table per matrix row
 `validate_flows.sh` only does connectivity probes (no data written to the
 platform). **Not applied in the CI sandbox** — no authorized target host.
 
-## 3. Staging / production (ADR-007)
+## 3. Staging (SEC-060)
+
+Staging is a **separate** environment — its own compose project, named
+volume, network, and `SECRET_KEY` — running the **same image** as prod.
+This is where the release checklist's acceptance section runs before human
+approval (docs/14). It is HTTP-only on the staging LAN (no public DNS, no
+TLS edge); production is the only environment with Caddy.
+
+```bash
+# same artifact as production
+docker build -f app/backend/Dockerfile -t cybersec:local .
+
+cd infra/staging
+cp .env.example .env                  # set a SECRET_KEY DIFFERENT from prod's
+docker compose up -d
+# seed synthetic data (disposable; labeled synthetic via X-Data-Class)
+docker compose exec cybersec python -m app.seed.seed_demo
+```
+
+Isolation guarantees: `cybersec-staging-data` volume + `cybersec-staging`
+network are never shared with production; every response carries
+`X-Environment: STAGING` + `X-Data-Class: synthetic-by-default`; the boot
+guard refuses the dev `SECRET_KEY`.
+
+## 4. Production (ADR-007)
 
 Build the multi-stage image from the repo root (it builds the SPA, then a
 non-root python:3.11 runtime; pinned pip deps in the final stage):
@@ -69,7 +94,7 @@ Secrets: copy `.env.example.prod`, generate `SECRET_KEY`
 (`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`), and fill
 `PROD_DOMAIN`. The file is gitignored; never commit real values.
 
-## 4. Backup & restore rehearsal (SEC-063)
+## 5. Backup & restore rehearsal (SEC-063)
 
 Live drill (in-process, default): boots the app on a temp `DATA_DIR`,
 seeds synthetic data, backs up, wipes the DB, runs the production restore,
@@ -88,9 +113,19 @@ from backup, and restarts** — run only against an authorized, disposable
 instance, and keep the moved files (the script logs the `lost` dir) until the
 restore is verified.
 
-## 5. Supply chain (SEC-062)
+## 6. Supply chain (SEC-062)
 
 CI (`.github/workflows/ci.yml`) generates a CycloneDX SBOM from the pinned
 `requirements.txt`, runs `pip-audit` (backend) and `npm audit` (frontend),
 and uploads the SBOM as an artifact. gitleaks scans for secrets on every
 push/PR.
+
+## 7. Release gate (SEC-064)
+
+The human-approval step of the release flow is recorded in the platform,
+not just in a ticket: an admin posts the decision (version, commit sha,
+signed-checklist sha256, `approved`/`rejected`) to
+`POST /api/admin/releases`; the gate view is
+`GET /api/admin/releases/latest` (`approved | blocked | no_decision`). The
+Admin → Releases tab drives it. Full checklist + signing steps:
+`docs/14-release-checklist.md`.

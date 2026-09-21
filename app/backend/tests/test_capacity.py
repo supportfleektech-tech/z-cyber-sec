@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 HOSTS = ["lab-web-01", "lab-db-01", "lab-jump-01"]
 BENIGN = ("file_read", "success", "info", "read /var/log/app.log")
@@ -17,7 +17,7 @@ ATTACK = ("ssh_failed_login", "failure", "medium", "ssh auth failure")
 
 def _events(n: int, offset: int) -> list[dict]:
     rng = random.Random(offset)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     out = []
     for k in range(n):
         attack = rng.random() < 0.2

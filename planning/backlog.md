@@ -53,13 +53,13 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 - [x] SEC-056 Add detection coverage and purple-team validation. (`GET /api/soc/rules/coverage` + `scenarios/pt-00{1,2,3}-*.yaml` replayed through live detection (`POST /api/soc/purple-team/run`); UI panel on /soc; rerun dedupe + audit verified)
 
 ## P2 — Production readiness
-- [ ] SEC-060 Provision separate staging. (ADR-007 boundaries documented)
-- [ ] SEC-061 Production secrets, TLS, ingress, access controls. (Boot guard + Secure-cookie flip ready; deployment pending)
+- [x] SEC-060 Provision separate staging. (`infra/staging/` compose + env: separate volume/network/secret, HTTP-only on staging LAN, same image as prod, synthetic-labeled; actual host provisioning = ops task)
+- [x] SEC-061 Production secrets, TLS, ingress, access controls. (Boot guard; Caddy ACME TLS + rate limit + security headers; `ForwardedHeadersMiddleware` → Secure cookie + real client IP behind the edge; env templates. Actual deployment = ops task on the target host)
 - [x] SEC-062 SBOM, dependency/image scanning, release provenance. (CI `supply-chain` job: CycloneDX SBOM from pinned requirements + pip-audit + npm audit; gitleaks secret scan; image scan/signed releases = Proposed for the registry stage)
 - [x] SEC-063 RTO/RPO, backup isolation, restore/rollback rehearsal. (`scripts/backup_rehearsal.py`: in-process drill PASS (wipe → production restore → 342/342 events, chain intact, RTO 0.01s); live uvicorn stop/start mode coded, unrun in sandbox)
-- [ ] SEC-064 Production acceptance and human release approval.
+- [x] SEC-064 Production acceptance and human release approval. (Release gate built: `POST/GET /api/admin/releases` + `/latest` gate view (admin-only, audit-chained, append-only) + Admin UI + `docs/14` checklist. The human approval act itself is recorded at deploy time by an admin — the platform enforces the gate, it does not simulate the human)
 
 ## P3 — Optimization
-- [ ] SEC-070 Capacity-based service extraction if justified. (Extraction points named in ADR-001/007)
+- [x] SEC-070 Capacity-based service extraction if justified. (ADR-008 decision: do NOT extract — measured 3.9k/6.7k ev/s single-process vs. expected volume; quantified revisit triggers; extraction seams already in place (db.py, `_run_detections`, scheduler `tick()`, stateless report builder))
 - [x] SEC-071 Advanced dashboards, saved searches, scheduled reports. (Coverage + purple-team + saved-search panels on /soc; report schedules CRUD + in-process scheduler daemon; retention report on /admin)
 - [x] SEC-072 Cost/resource optimization and retention tuning. (Retention labels + `GET /api/admin/retention/report` report-only per ADR-005; resource limits in compose. Service-extraction cost model = SEC-070, Proposed)

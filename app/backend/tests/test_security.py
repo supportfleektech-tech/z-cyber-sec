@@ -1,6 +1,8 @@
 """Security tests: injection defenses, error hygiene, transport posture."""
 from __future__ import annotations
 
+import pytest
+
 
 def test_sql_injection_attempts(client, seeded):
     probes = ["' OR '1'='1", "1; DROP TABLE events;--", "%', 'x') OR ('x'", "1 UNION SELECT * FROM users"]
@@ -56,6 +58,80 @@ def test_cookie_flags(client, seeded):
     assert "samesite=strict" in set_cookie.lower()
     # over plain http in tests the cookie is NOT secure (correct behavior: secure only on https)
     assert "secure" not in set_cookie.lower()
+
+
+def test_cookie_secure_and_client_ip_behind_tls_edge(client, seeded):
+    """SEC-061: behind Caddy, X-Forwarded-Proto/For make the cookie Secure and
+    the session record the real client IP (last XFF entry, not the proxy)."""
+    from app import db
+
+    conn = db.raw_connection()
+    try:
+        before = int(db.one(conn, "SELECT COUNT(*) c FROM sessions")["c"])
+    finally:
+        conn.close()
+
+    r = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "CyberSecAdmin1!"},
+        headers={
+            "X-Forwarded-Proto": "https",
+            # forged leading entries must be ignored: Caddy appends the real IP last
+            "X-Forwarded-For": "203.0.113.99, 198.51.100.7",
+        },
+    )
+    assert r.status_code == 200
+    set_cookie = r.headers.get("set-cookie", "").lower()
+    assert "secure" in set_cookie
+
+    conn = db.raw_connection()
+    try:
+        row = db.one(conn, "SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert int(db.one(conn, "SELECT COUNT(*) c FROM sessions")["c"]) == before + 1
+        assert row["ip"] == "198.51.100.7"
+    finally:
+        conn.close()
+
+
+def test_boot_guard_rejects_placeholder_secrets(monkeypatch):
+    """ADR-006 (hardened): STAGING/PROD refuse the dev default, unedited
+    template placeholders, and low-entropy keys; LOCAL stays permissive
+    (the offline lab is safe by design)."""
+    from app.config import load_settings
+
+    for bad in ("dev-only-change-me-in-staging", "__SET__", "changeme", "", "short-key"):
+        monkeypatch.setenv("ENV_NAME", "STAGING")
+        monkeypatch.setenv("SECRET_KEY", bad)
+        with pytest.raises(RuntimeError, match="SECRET_KEY"):
+            load_settings()
+
+    monkeypatch.setenv("SECRET_KEY", "a" * 64)
+    s = load_settings()
+    assert s.env_name == "STAGING" and s.secret_key == "a" * 64
+
+    # LOCAL lab: dev default is fine (network-bounded, synthetic data)
+    monkeypatch.setenv("ENV_NAME", "LOCAL")
+    monkeypatch.setenv("SECRET_KEY", "dev-only-change-me-in-staging")
+    assert load_settings().secret_key == "dev-only-change-me-in-staging"
+
+
+def test_direct_connection_keeps_local_behavior(client, seeded):
+    """No forwarded headers (local lab, no edge): scheme stays http (no
+    Secure cookie) and the session records the direct connection IP."""
+    from app import db
+
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    assert r.status_code == 200
+    assert "secure" not in r.headers.get("set-cookie", "").lower()
+
+    conn = db.raw_connection()
+    try:
+        row = db.one(conn, "SELECT * FROM sessions ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert row["ip"] == "testclient"  # TestClient's direct-connection identity
+    finally:
+        conn.close()
 
 
 def test_event_payload_limits(client, seeded):

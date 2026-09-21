@@ -38,21 +38,31 @@ interface Paged<T> {
   items: T[];
   total: number;
 }
+interface Release {
+  id: number;
+  version: string;
+  commit_sha: string;
+  checklist_sha256: string;
+  decision: string;
+  decided_by: string;
+  comment: string | null;
+  created_at: string;
+}
 
 const ROLES = ["admin", "ir_lead", "soc_analyst", "viewer", "agent_service"];
 
 export default function Admin() {
   const [flash, flashShow] = useFlash();
-  const [tab, setTab] = useState<"audit" | "users" | "integrations" | "flags" | "backup">("audit");
+  const [tab, setTab] = useState<"audit" | "users" | "integrations" | "flags" | "backup" | "releases">("audit");
   return (
     <>
       <PageHead
         title="Admin"
-        sub="Users & roles · audit chain integrity · integrations · feature flags · backup/restore"
+        sub="Users & roles · audit chain integrity · integrations · feature flags · backup/restore · release gate"
       />
       {flash}
       <div className="toolbar">
-        {(["audit", "users", "integrations", "flags", "backup"] as const).map((t) => (
+        {(["audit", "users", "integrations", "flags", "backup", "releases"] as const).map((t) => (
           <button key={t} className={tab === t ? "primary small" : "small"} onClick={() => setTab(t)}>
             {t}
           </button>
@@ -63,6 +73,7 @@ export default function Admin() {
       {tab === "integrations" && <IntegrationsTab onFlash={flashShow} />}
       {tab === "flags" && <FlagsTab onFlash={flashShow} />}
       {tab === "backup" && <BackupTab onFlash={flashShow} />}
+      {tab === "releases" && <ReleasesTab onFlash={flashShow} />}
     </>
   );
 }
@@ -377,6 +388,105 @@ function BackupTab({ onFlash }: { onFlash: (m: string, ok?: boolean) => void }) 
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+function ReleasesTab({ onFlash }: { onFlash: (m: string, ok?: boolean) => void }) {
+  const [version, setVersion] = useState("");
+  const [commit, setCommit] = useState("");
+  const [sha, setSha] = useState("");
+  const [decision, setDecision] = useState<"approved" | "rejected">("approved");
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const latest = useApi<{ latest: Release | null; gate: string; note: string | null }>(
+    () => api.get("/api/admin/releases/latest"), []);
+  const list = useApi<Paged<Release>>(() => api.get<Paged<Release>>("/api/admin/releases"), []);
+  return (
+    <div className="panel">
+      <h2>Release gate (SEC-064 — human approval is the gate)</h2>
+      <div className="note-box">
+        A production/staging rollout requires a recorded human decision bound to an exact commit and a
+        signed checklist artifact (sha256). Check the full checklist + signing steps in{" "}
+        <code>docs/14-release-checklist.md</code>. The gate must read <b>approved</b> for the version you
+        intend to promote — otherwise stop.
+      </div>
+      <div className="row mt" style={{ alignItems: "flex-start" }}>
+        <div style={{ flex: 1 }}>
+          <div className="faint">Current gate</div>
+          <LoadBlock loading={latest.loading} error={latest.error}>
+            {latest.data && (
+              <div style={{ fontSize: 15 }}>
+                <span className={`st ${latest.data.gate === "approved" ? "closed" : "denied"}`} style={{ fontSize: 13 }}>
+                  {latest.data.gate}
+                </span>{" "}
+                {latest.data.latest
+                  ? <span className="dim mono">v{latest.data.latest.version} @ {latest.data.latest.commit_sha.slice(0, 10)} — {latest.data.latest.decision} by {latest.data.latest.decided_by} ({fmtTs(latest.data.latest.created_at)})</span>
+                  : <span className="dim">no decision recorded yet</span>}
+                {latest.data.note && <div className="dim" style={{ marginTop: 4 }}>{latest.data.note}</div>}
+              </div>
+            )}
+          </LoadBlock>
+        </div>
+        <div style={{ flex: 1, minWidth: 320 }}>
+          <div className="faint">Record a decision (admin)</div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <input placeholder="version e.g. 1.1.0" value={version} onChange={(e) => setVersion(e.target.value)} style={{ width: 110 }} />
+            <input placeholder="commit sha" value={commit} onChange={(e) => setCommit(e.target.value)} className="mono" style={{ width: 130 }} />
+            <select value={decision} onChange={(e) => setDecision(e.target.value as "approved" | "rejected")}>
+              <option value="approved">approved</option>
+              <option value="rejected">rejected</option>
+            </select>
+          </div>
+          <div className="row mt" style={{ gap: 6 }}>
+            <input placeholder="checklist sha256 (64 hex)" value={sha} onChange={(e) => setSha(e.target.value)} className="mono" style={{ width: 240 }} />
+            <input placeholder="comment" value={comment} onChange={(e) => setComment(e.target.value)} style={{ flex: 1 }} />
+          </div>
+          {err && <div className="error-box mt">{err}</div>}
+          <div className="mt">
+            <button
+              className={decision === "approved" ? "primary" : "danger"}
+              disabled={busy || !version || !commit || sha.length !== 64}
+              onClick={async () => {
+                setBusy(true); setErr(null);
+                try {
+                  await api.post("/api/admin/releases", {
+                    version, commit_sha: commit, checklist_sha256: sha, decision, comment: comment || undefined,
+                  });
+                  onFlash(`Release ${version} ${decision} recorded`);
+                  setVersion(""); setCommit(""); setSha(""); setComment("");
+                  latest.reload(); list.reload();
+                } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+              }}
+            >
+              {busy ? "Recording…" : `Record ${decision}`}
+            </button>
+            <span className="faint">→ audit event release.{decision} (append-only)</span>
+          </div>
+        </div>
+      </div>
+      <div className="faint mt">Decision history</div>
+      <LoadBlock loading={list.loading} error={list.error} empty={!list.data?.items?.length}>
+        <table className="tbl">
+          <thead>
+            <tr><th>Version</th><th>Commit</th><th>Checklist sha256</th><th>Decision</th><th>By</th><th>When</th><th>Comment</th></tr>
+          </thead>
+          <tbody>
+            {list.data!.items.map((r) => (
+              <tr key={r.id}>
+                <td className="mono">v{r.version}</td>
+                <td className="mono dim">{r.commit_sha.slice(0, 12)}</td>
+                <td className="mono dim" title={r.checklist_sha256}>{r.checklist_sha256.slice(0, 16)}…</td>
+                <td><span className={`st ${r.decision === "approved" ? "closed" : "denied"}`}>{r.decision}</span></td>
+                <td>{r.decided_by}</td>
+                <td className="dim">{fmtTs(r.created_at)}</td>
+                <td className="dim" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis" }}>{r.comment || ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </LoadBlock>
     </div>
   );
 }

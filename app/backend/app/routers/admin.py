@@ -266,3 +266,56 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
         },
         "backups": {"total": len(backups), "items": backups},
     }
+
+
+# ------------------------------------------------------------------ releases
+# SEC-064: human release approval gate. A production/staging rollout requires
+# a recorded HUMAN decision (release.write = admin) referencing the checklist
+# artifact's sha256 (docs/14). Append-only; audit-logged; reject is allowed
+# (records a decision not to release).
+
+class ReleaseIn(BaseModel):
+    version: str = Field(min_length=1, max_length=64)
+    commit_sha: str = Field(min_length=7, max_length=64, pattern=r"^[0-9a-f]{7,64}$",
+                            description="Git commit of the released artifact.")
+    checklist_sha256: str = Field(pattern=r"^[0-9a-f]{64}$",
+                                  description="sha256 of the signed release checklist artifact (docs/14).")
+    decision: str = Field(pattern=r"^(approved|rejected)$")
+    comment: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/releases", status_code=201)
+def record_release(body: ReleaseIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                   user: dict = Depends(require("release.write"))):
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO releases (version, commit_sha, checklist_sha256, decision, decided_by, comment, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (body.version, body.commit_sha, body.checklist_sha256, body.decision,
+         user["username"], body.comment, now))
+    conn.commit()
+    record_audit(conn, _actor(user), "release." + ("approved" if body.decision == "approved" else "rejected"),
+                 target_type="release", target_id=str(cur.lastrowid),
+                 detail={"version": body.version, "commit_sha": body.commit_sha,
+                         "checklist_sha256": body.checklist_sha256})
+    return db.one(conn, "SELECT * FROM releases WHERE id = ?", (cur.lastrowid,))
+
+
+@router.get("/releases")
+def list_releases(conn: sqlite3.Connection = Depends(db.get_conn),
+                  user: dict = Depends(require("release.read")),
+                  page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
+    return db.paged(conn, "SELECT * FROM releases", (), "ORDER BY created_at DESC, id DESC", page, page_size)
+
+
+@router.get("/releases/latest")
+def latest_release(conn: sqlite3.Connection = Depends(db.get_conn),
+                   user: dict = Depends(require("release.read"))):
+    """The gate view: the most recent decision. Rollout tooling/ops MUST see
+    decision=approved for the target version+commit before promoting."""
+    row = db.one(conn, "SELECT * FROM releases ORDER BY created_at DESC, id DESC LIMIT 1")
+    if not row:
+        return {"latest": None, "gate": "no_decision",
+                "note": "No release decision recorded. Production rollout is blocked until an admin approves (docs/14)."}
+    return {"latest": row, "gate": "approved" if row["decision"] == "approved" else "blocked",
+            "note": None if row["decision"] == "approved" else "Latest decision is not an approval — rollout blocked."}

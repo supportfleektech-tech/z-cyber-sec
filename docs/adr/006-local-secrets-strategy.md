@@ -15,10 +15,14 @@ out; the strategy has to work with files on the host and the environment.
 - **Environment-driven config** (`app/config.py`): every secret comes from
   the environment or `.env`; **`.env` is gitignored**, and a committed
   `.env.example` documents the shape (values are placeholders).
-- **Boot guard:** if `ENV_NAME` is `STAGING` or `PROD` and `SECRET_KEY` is
-  still the committed dev default (`dev-only-change-me-in-staging`), the
-  process **refuses to start**. There is no "it works, remember to change
-  it later" path.
+- **Boot guard:** if `ENV_NAME` is `STAGING` or `PROD`, the process
+  **refuses to start** unless `SECRET_KEY` is a strong unique value: the
+  committed dev default, unedited template placeholders (`__SET__`,
+  `changeme`, …), and anything shorter than 32 chars are all rejected.
+  There is no "it works, remember to change it later" path. (Hardened
+  2026-09-21: the original guard only caught the dev default; an operator
+  who copied `.env.example` without editing would have booted on
+  `__SET__`.)
 - **Synthetic credentials by default:** the seed creates lab accounts
   (e.g. `admin / CyberSecAdmin1!`) that exist **only** in the local
   synthetic database; no real identity, API key, or token is ever written
