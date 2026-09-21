@@ -1,0 +1,25 @@
+# STARTER TEMPLATE ONLY — review before use.
+# This deliberately does not publish ports or define app services until architecture,
+# port conflicts, resource capacity, and secrets are audited.
+name: cyber-sec
+
+services:
+  # Add only reviewed services after Phase 0.
+  # Example pattern:
+  # app:
+  #   image: registry.example.invalid/cyber-sec/app:PINNED_VERSION
+  #   restart: unless-stopped
+  #   read_only: true
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   cap_drop:
+  #     - ALL
+  #   networks:
+  #     - platform_internal
+  #   # Add explicit resource limits, healthcheck, and secret handling.
+  #
+  # Never place vulnerable exercise targets on this platform network.
+
+networks:
+  platform_internal:
+    internal: true
