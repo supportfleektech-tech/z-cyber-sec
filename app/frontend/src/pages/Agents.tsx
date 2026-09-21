@@ -9,6 +9,8 @@ interface Agent {
   role: string | null;
   status: string;
   tools: string[];
+  adapter?: string;
+  adapter_config?: Record<string, string>;
 }
 interface Task {
   id: number;
@@ -113,6 +115,7 @@ export default function Agents() {
                   <b>{a.name}</b>
                   <StBadge value={a.status} />
                   <span className="faint">provider: {a.provider}</span>
+                  <span className="faint">adapter: {a.adapter || "builtin"}</span>
                 </div>
                 <div className="faint mb" style={{ marginTop: 2 }}>
                   {a.tools.map((t) => (
@@ -126,6 +129,9 @@ export default function Agents() {
           </LoadBlock>
           <div className="mt">
             <Evals agents={agents.data?.items || []} onDone={(m) => flashShow(m)} />
+          </div>
+          <div className="mt">
+            <NewAgentForm onCreated={() => agents.reload()} />
           </div>
         </div>
       </div>
@@ -250,8 +256,10 @@ function NewTask({ agents, onDone }: { agents: Agent[]; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [agentId, setAgentId] = useState("");
   const [title, setTitle] = useState("");
+  const [mode, setMode] = useState<"tool" | "prompt">("tool");
   const [tool, setTool] = useState("summarize_alerts");
   const [argsText, setArgsText] = useState("{}");
+  const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const agent = agents.find((a) => a.id === Number(agentId));
@@ -293,22 +301,43 @@ function NewTask({ agents, onDone }: { agents: Agent[]; onDone: () => void }) {
           </div>
           <label className="f">Title</label>
           <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
-          <label className="f">Args (JSON)</label>
-          <textarea rows={3} value={argsText} onChange={(e) => setArgsText(e.target.value)} />
+          <div className="row mt">
+            <label className="f" style={{ margin: 0 }}>Mode</label>
+            <select value={mode} onChange={(e) => setMode(e.target.value as "tool" | "prompt")}>
+              <option value="tool">Explicit tool call</option>
+              <option value="prompt">Prompt (adapter brain — resolved to plan)</option>
+            </select>
+            <span className="faint">policy-checked either way</span>
+          </div>
+          {mode === "prompt" ? (
+            <>
+              <label className="f">Prompt</label>
+              <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)}
+                placeholder="e.g. Summarize the 5 most severe open alerts and propose next steps" />
+            </>
+          ) : (
+            <>
+              <label className="f">Args (JSON)</label>
+              <textarea rows={3} value={argsText} onChange={(e) => setArgsText(e.target.value)} />
+            </>
+          )}
           {err && <div className="error-box">{err}</div>}
           <div className="row mt" style={{ justifyContent: "flex-end" }}>
             <button onClick={() => setOpen(false)}>Cancel</button>
             <button
               className="primary"
-              disabled={busy || !title || !agentId}
+              disabled={busy || !title || !agentId || (mode === "prompt" && !prompt)}
               onClick={async () => {
                 setBusy(true);
                 setErr(null);
                 try {
+                  const request = mode === "prompt"
+                    ? { prompt }
+                    : { tool, args: JSON.parse(argsText || "{}") };
                   const out = await api.post<Task>("/api/agents/tasks", {
                     agent_id: Number(agentId),
                     title,
-                    request: { tool, args: JSON.parse(argsText || "{}") },
+                    request,
                   });
                   setOpen(false);
                   onDone();
@@ -360,6 +389,96 @@ function Evals({ agents, onDone }: { agents: Agent[]; onDone: (m: string) => voi
       >
         {busy ? "Running…" : "Run governance evals"}
       </button>
+    </div>
+  );
+}
+
+function NewAgentForm({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("");
+  const [adapter, setAdapter] = useState("builtin");
+  const [tools, setTools] = useState("summarize_alerts");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [command, setCommand] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const buildConfig = (): Record<string, string> => {
+    if (adapter === "openai_compat") return { base_url: baseUrl, model, api_key_env: "OPENAI_API_KEY" };
+    if (adapter === "cli") return { command, allowed_tools: tools };
+    return {};
+  };
+
+  return (
+    <div>
+      <button className="small" onClick={() => { setErr(null); setOpen(true); }}>+ New agent</button>
+      {open && (
+        <div className="panel mt" style={{ background: "var(--bg-panel-2)" }}>
+          <div className="formrow">
+            <div>
+              <label className="f">Name</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="ir-assistant" style={{ width: 170 }} />
+            </div>
+            <div>
+              <label className="f">Role</label>
+              <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="ir_analyst" style={{ width: 140 }} />
+            </div>
+            <div>
+              <label className="f">Adapter</label>
+              <select value={adapter} onChange={(e) => setAdapter(e.target.value)}>
+                <option value="builtin">builtin (deterministic)</option>
+                <option value="openai_compat">openai_compat (local model)</option>
+                <option value="cli">cli (external script)</option>
+              </select>
+            </div>
+          </div>
+          <label className="f">Tool allowlist (comma-separated)</label>
+          <input value={tools} onChange={(e) => setTools(e.target.value)} style={{ width: "100%" }} />
+          {adapter === "openai_compat" && (
+            <div className="formrow mt">
+              <div>
+                <label className="f">Base URL (local server)</label>
+                <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://ollama:11434/v1" style={{ width: "100%" }} />
+              </div>
+              <div>
+                <label className="f">Model</label>
+                <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="llama3" style={{ width: "100%" }} />
+              </div>
+            </div>
+          )}
+          {adapter === "cli" && (
+            <div className="mt">
+              <label className="f">Command (reads JSON on stdin, writes JSON)</label>
+              <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="/usr/local/bin/brain --safe" style={{ width: "100%" }} />
+            </div>
+          )}
+          {err && <div className="error-box">{err}</div>}
+          <div className="row mt" style={{ justifyContent: "flex-end" }}>
+            <button onClick={() => setOpen(false)}>Cancel</button>
+            <button
+              className="primary"
+              disabled={busy || !name}
+              onClick={async () => {
+                setBusy(true); setErr(null);
+                try {
+                  await api.post("/api/agents", {
+                    name,
+                    role: role || undefined,
+                    adapter,
+                    adapter_config: buildConfig(),
+                    tools: tools.split(",").map((t) => t.trim()).filter(Boolean),
+                  });
+                  setOpen(false);
+                  onCreated();
+                } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+              }}>
+              {busy ? "Creating…" : "Create agent"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

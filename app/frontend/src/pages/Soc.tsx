@@ -36,6 +36,28 @@ interface Paged<T> {
   items: T[];
   total: number;
 }
+interface Coverage {
+  total_rules: number;
+  active_rules: number;
+  fired_rules: number;
+  coverage_pct: number;
+  gaps: { uid: string; name: string; severity: string }[];
+  rules: { uid: string; name: string; severity: string; status: string; alerts_total: number; last_alert_at: string | null; never_fired: boolean }[];
+}
+interface Scenario {
+  uid: string;
+  name: string;
+  description: string;
+  expected_rule: string;
+  events: number;
+}
+interface SavedSearch {
+  id: number;
+  name: string;
+  module: string;
+  params: Record<string, unknown>;
+  created_at: string;
+}
 
 const TRIAGE_STATUSES = ["new", "triaging", "confirmed", "false_positive", "closed"];
 
@@ -166,6 +188,15 @@ export default function Soc() {
             </table>
           </LoadBlock>
         </div>
+      </div>
+
+      <div className="grid cols-3 mt">
+        <CoveragePanel />
+        <PurpleTeamPanel onRan={() => { alerts.reload(); }} />
+        <SavedSearchesPanel
+          currentParams={{ q, status, severity }}
+          onApply={(p) => { setQ(p.q || ""); setStatus(p.status || ""); setSeverity(p.severity || ""); setPage(1); }}
+        />
       </div>
 
       {sel && (
@@ -311,6 +342,142 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CoveragePanel() {
+  const cov = useApi<Coverage>(() => api.get<Coverage>("/api/soc/rules/coverage"), []);
+  return (
+    <div className="panel">
+      <h2>Detection coverage</h2>
+      <LoadBlock loading={cov.loading} error={cov.error}>
+        {cov.data && (
+          <>
+            <div className="grid cols-2 mb">
+              <div className="stat"><div className="k">coverage</div><div className="v">{cov.data.coverage_pct}%</div><div className="s">active rules have fired</div></div>
+              <div className="stat"><div className="k">fired / active</div><div className="v">{cov.data.fired_rules}/{cov.data.active_rules}</div><div className="s">of {cov.data.total_rules} total</div></div>
+            </div>
+            {cov.data.gaps.length > 0 ? (
+              <div className="faint mb">Coverage gaps (active, never fired): {cov.data.gaps.map((g) => g.uid).join(", ")}</div>
+            ) : (
+              <div className="faint mb">No coverage gaps — every active rule has fired.</div>
+            )}
+            <table className="tbl">
+              <tbody>
+                {cov.data.rules.map((r) => (
+                  <tr key={r.uid}>
+                    <td className="mono dim">{r.uid}</td>
+                    <td>{r.name}</td>
+                    <td className="dim">{r.alerts_total}</td>
+                    <td>{r.never_fired ? <span className="st open">gap</span> : <span className="st closed">fired</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </LoadBlock>
+    </div>
+  );
+}
+
+function PurpleTeamPanel({ onRan }: { onRan: () => void }) {
+  const sc = useApi<{ scenarios: Scenario[] }>(() => api.get<{ scenarios: Scenario[] }>("/api/soc/purple-team/scenarios"), []);
+  const [flash, flashShow] = useFlash();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [last, setLast] = useState<Record<string, boolean>>({});
+  return (
+    <div className="panel">
+      <h2>Purple team</h2>
+      <div className="faint mb">Recorded synthetic attacks run through the live detection path — expect the named rule to fire.</div>
+      {flash}
+      <LoadBlock loading={sc.loading} error={sc.error} empty={!sc.data?.scenarios?.length}>
+        <table className="tbl">
+          <tbody>
+            {sc.data!.scenarios.map((s) => (
+              <tr key={s.uid}>
+                <td className="mono dim">{s.uid}</td>
+                <td>{s.name}<div className="faint" style={{ fontSize: 11 }}>{s.events} events → {s.expected_rule}</div></td>
+                <td>
+                  {last[s.uid] !== undefined && (last[s.uid] ? <span className="st closed">pass</span> : <span className="st denied">fail</span>)}
+                  <button className="small" disabled={busy === s.uid}
+                    onClick={async () => {
+                      setBusy(s.uid);
+                      try {
+                        const out = await api.post<{ passed: boolean; run_id: string }>(`/api/soc/purple-team/run`, { scenario: s.uid });
+                        setLast((p) => ({ ...p, [s.uid]: out.passed }));
+                        flashShow(`PT ${s.uid}: ${out.passed ? "PASS" : "FAIL"} (run ${out.run_id})`);
+                        onRan();
+                      } finally {
+                        setBusy(null);
+                      }
+                    }}>
+                    {busy === s.uid ? "Running…" : "Run"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </LoadBlock>
+    </div>
+  );
+}
+
+function SavedSearchesPanel({ currentParams, onApply }: {
+  currentParams: Record<string, string>;
+  onApply: (p: Record<string, string>) => void;
+}) {
+  const [name, setName] = useState("");
+  const ss = useApi<{ items: SavedSearch[]; total: number }>(
+    () => api.get<{ items: SavedSearch[]; total: number }>("/api/soc/saved-searches"), []);
+  const [flash, flashShow] = useFlash();
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="panel">
+      <h2>Saved searches</h2>
+      {flash}
+      <div className="row mb">
+        <input placeholder="Name this filter…" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 150 }} />
+        <button className="small" disabled={!name.trim()}
+          onClick={async () => {
+            setErr(null);
+            try {
+              await api.post("/api/soc/saved-searches", { name: name.trim(), module: "alerts", params: currentParams });
+              setName("");
+              flashShow("Saved current alert filter");
+              ss.reload();
+            } catch (e) {
+              setErr((e as Error).message);
+            }
+          }}>
+          Save current
+        </button>
+      </div>
+      {err && <div className="error-box">{err}</div>}
+      <LoadBlock loading={ss.loading} error={ss.error} empty={!ss.data?.items?.length}>
+        <table className="tbl">
+          <tbody>
+            {ss.data!.items.map((s) => (
+              <tr key={s.id}>
+                <td>{s.name}</td>
+                <td className="dim mono" style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {JSON.stringify(s.params)}
+                </td>
+                <td>
+                  <button className="small" onClick={() => onApply(s.params as Record<string, string>)}>Apply</button>{" "}
+                  <button className="small danger"
+                    onClick={async () => {
+                      await api.delete(`/api/soc/saved-searches/${s.id}`);
+                      ss.reload();
+                    }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </LoadBlock>
     </div>
   );
 }

@@ -344,3 +344,117 @@ def rule_dry_run(body: RuleDryRun, conn: sqlite3.Connection = Depends(db.get_con
                         "WHERE id IN (%s)" % ",".join("?" * len(body.event_ids)), tuple(body.event_ids))
     groups = evaluate_batch(rule, events)
     return {"rule_uid": r["uid"], "events_checked": len(events), "alert_groups": groups}
+
+
+# ---------------------------------------------------------------- coverage
+# SEC-056: detection coverage — which rules have ever fired, which are gaps.
+
+@router.get("/rules/coverage")
+def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
+                   user: dict = Depends(require("soc.read"))):
+    rules = db.q(conn, "SELECT * FROM detection_rules ORDER BY uid")
+    per_rule = []
+    gaps = []
+    for r in rules:
+        alert = db.one(conn,
+            "SELECT COUNT(*) AS n, MAX(last_seen) AS last_seen FROM alerts WHERE rule_id = ?",
+            (r["id"],))
+        n = alert["n"] if alert else 0
+        last = alert["last_seen"] if alert else None
+        active = r["status"] == "active"
+        never_fired = n == 0
+        per_rule.append({
+            "rule_id": r["id"], "uid": r["uid"], "name": r["name"],
+            "severity": r["severity"], "status": r["status"],
+            "alerts_total": n, "last_alert_at": last,
+            "never_fired": never_fired,
+        })
+        if active and never_fired:
+            gaps.append({"uid": r["uid"], "name": r["name"], "severity": r["severity"]})
+    active_rules = [p for p in per_rule if p["status"] == "active"]
+    fired = [p for p in active_rules if not p["never_fired"]]
+    coverage_pct = round(100.0 * len(fired) / len(active_rules), 1) if active_rules else 100.0
+    return {
+        "total_rules": len(rules),
+        "active_rules": len(active_rules),
+        "fired_rules": len(fired),
+        "coverage_pct": coverage_pct,
+        "gaps": gaps,
+        "rules": per_rule,
+    }
+
+
+# ------------------------------------------------------------ purple team
+# SEC-056: recorded synthetic attack sequences validated against live rules.
+
+class PurpleRunIn(BaseModel):
+    scenario: str = Field(min_length=2, max_length=64)
+
+
+@router.get("/purple-team/scenarios")
+def purple_scenarios(user: dict = Depends(require("soc.read"))):
+    from ..services import purple_team
+    return {"scenarios": purple_team.list_scenarios()}
+
+
+@router.post("/purple-team/run")
+def purple_run(body: PurpleRunIn, conn: sqlite3.Connection = Depends(db.get_conn),
+               user: dict = Depends(require("soc.write"))):
+    from ..services import purple_team
+    try:
+        return purple_team.run_scenario(conn, body.scenario, _actor(user))
+    except ValueError as e:
+        raise HTTPException(404, {"code": "not_found", "message": str(e)}) from e
+
+
+# -------------------------------------------------------- saved searches
+# SEC-071: named, user-scoped filter sets for event/alert queries.
+
+class SavedSearchIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    module: str = "soc"          # 'events' | 'alerts'
+    params: dict = Field(default_factory=dict)
+
+
+@router.get("/saved-searches")
+def list_saved_searches(conn: sqlite3.Connection = Depends(db.get_conn),
+                        user: dict = Depends(require("soc.read")),
+                        module: str | None = None):
+    where, params = ["owner = ?"], [user["username"]]
+    if module:
+        where.append("module = ?")
+        params.append(module)
+    rows = db.q(conn, "SELECT * FROM saved_searches WHERE " + " AND ".join(where)
+                + " ORDER BY id DESC", tuple(params))
+    for r in rows:
+        r["params"] = db.jload(r.get("params"), {})
+    return {"items": rows, "total": len(rows)}
+
+
+@router.post("/saved-searches", status_code=201)
+def save_search(body: SavedSearchIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("soc.write"))):
+    if body.module not in ("events", "alerts"):
+        raise HTTPException(400, {"code": "bad_module", "message": "module must be 'events' or 'alerts'"})
+    cur = conn.execute(
+        "INSERT INTO saved_searches (name, owner, module, params, created_at) VALUES (?, ?, ?, ?, ?)",
+        (body.name, user["username"], body.module, db.jdump(body.params), db.utcnow()))
+    conn.commit()
+    record_audit(conn, _actor(user), "saved_search.created", target_type="saved_search",
+                 target_id=str(cur.lastrowid), detail={"name": body.name, "module": body.module})
+    return db.one(conn, "SELECT * FROM saved_searches WHERE id = ?", (cur.lastrowid,))
+
+
+@router.delete("/saved-searches/{ss_id}")
+def delete_saved_search(ss_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
+                        user: dict = Depends(require("soc.write"))):
+    row = db.one(conn, "SELECT * FROM saved_searches WHERE id = ?", (ss_id,))
+    if not row:
+        raise HTTPException(404, {"code": "not_found"})
+    if row["owner"] != user["username"]:
+        raise HTTPException(403, {"code": "forbidden", "message": "not your saved search"})
+    conn.execute("DELETE FROM saved_searches WHERE id = ?", (ss_id,))
+    conn.commit()
+    record_audit(conn, _actor(user), "saved_search.deleted", target_type="saved_search",
+                 target_id=str(ss_id), detail={"name": row["name"]})
+    return {"ok": True}

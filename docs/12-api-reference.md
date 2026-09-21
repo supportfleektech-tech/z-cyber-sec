@@ -42,6 +42,19 @@ verification evidence.
 | `GET/POST /rules` · `PATCH /rules/{id}` | Detection rule CRUD (Sigma-subset) |
 | `POST /rules/dry-run` | Evaluate a rule draft against stored events |
 | `POST /detections/backfill` | Re-evaluate stored events after rule changes |
+| `GET /rules/coverage` | Coverage report (SEC-071): which active rules have fired + gaps `{coverage_pct, fired_rules, active_rules, gaps[], rules[]}` |
+| `POST /saved-searches` | Save the current alert filter `{name, module:"alerts", params{status,severity,q}}` (owner-scoped) |
+| `GET /saved-searches` · `DELETE /saved-searches/{id}` | List own saved searches; delete (403 cross-owner) |
+
+### Purple team (`/api/soc/purple-team`) — SEC-072
+| Method & path | Purpose |
+|---|---|
+| `GET /scenarios` | List replayable synthetic-attack scenarios `{uid, name, description, expected_rule, events}` |
+| `POST /run` | `{scenario: uid}` — replay through the live detection path (synthetic `pt-*` hosts) → `{run_id, passed, alerts, gaps}` |
+
+Scenarios are recorded YAML under `app/backend/scenarios/`; each maps to a
+real detection rule. Runs are synthetic and labeled `SYNTHETIC-PURPLE-TEAM`;
+they never touch real entities and dedupe against prior runs.
 
 ### Cases / IR (`/api/cases`)
 `GET/POST /` · `GET/PATCH /{case_id}` (lifecycle + severity) ·
@@ -85,11 +98,19 @@ never initiates network action — threat model).
 | `POST /approvals/{id}/decide` | `{decision: approve|reject, comment?}` — the human gate |
 | `GET/POST /tasks` · `GET /tasks/{id}` | Task queue; detail includes `result`, original `request`, `tool_calls[]` (tool, allowed, reason, result), `approvals[]` |
 | `GET /tools` | Tool registry: `{name: {description, read_only, requires_approval}}` |
-| `GET/POST /` · `PATCH /{agent_id}` | Agent registry + per-agent tool allowlists |
+| `GET/POST /` · `PATCH /{agent_id}` | Agent registry + per-agent tool allowlists. Create/patch accept `adapter` (`builtin`\|`openai_compat`\|`cli`) + `adapter_config` (SEC-050) |
 | `POST /evals/run` | Run the eval harness (`{agent_id}` → `{agent, passed, total, results}`) |
 
 Governance (ADR in docs/06): non-read-only tools require approval;
 out-of-allowlist tools are denied; agents cannot waive their own gates.
+
+Adapter brains (SEC-050): a task whose `request` is `{prompt}` (no explicit
+`tool`) is handed to the agent's adapter, which returns a `steps` plan; the
+gateway still policy-checks every step against the allowlist and gates
+consequential tools. `openai_compat` calls a **local** OpenAI-compatible
+endpoint (config carries `base_url` + `model`; key only via env var name —
+never stored). `cli` shells out to an allowlisted command with a timeout.
+Builtin (default) is deterministic and needs no brain.
 
 ### Automation (`/api/automation`)
 `GET /` (playbooks, `{items,total}`) · `GET /runs` ·
@@ -103,6 +124,20 @@ agent gateway.
 `GET /` (kind filter) · `GET /{id}/download` (requires
 `reports.generate`; audited).
 
+Scheduled reports (SEC-072):
+| Method & path | Purpose |
+|---|---|
+| `GET /schedules` | List report schedules `{id, kind, title, filters, interval_minutes, last_run_at, next_run_at, status, created_by}` |
+| `POST /schedules` | `{kind, title?, filters?, interval_minutes: 60..43200}` — creates an `active` schedule |
+| `PATCH /schedules/{id}` | `{status: active\|paused}` (only) |
+| `DELETE /schedules/{id}` | Remove a schedule |
+| `POST /schedules/run-due` | Execute schedules whose `next_run_at` is due (the in-process scheduler calls this each tick); returns `{built, report_ids}` |
+
+The scheduler is an in-process stdlib daemon (no external broker) that wakes
+every ~30s, marks due schedules, and builds their reports as
+`scheduler:<created_by>`. It resumes from persisted `next_run_at`, so restarts
+are safe; at-most-once-per-interval by design.
+
 ### Admin (`/api/admin`)
 | Method & path | Purpose |
 |---|---|
@@ -113,6 +148,7 @@ agent gateway.
 | `GET/POST /integrations` · `POST /integrations/{id}/health` | Integration inventory + health probe |
 | `POST /backup` | Consistent backup → `{path, sha256, ...}` |
 | `POST /backup/restore` | `{path, confirm:"RESTORE"}`; path must be under `data/backups` |
+| `GET /retention/report` | Evidence retention **report only** (SEC-072, ADR-005): per-item `within_retention`/`due` + `legal_hold` (case-bound) flags; never deletes — deletion stays a human, audited act |
 
 ## Audit format
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from .. import db
 from ..audit import record_audit
 from ..deps import require
-from ..services import policy
+from ..services import agent_adapters, policy
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -35,12 +35,16 @@ def list_tools(user: dict = Depends(require("agents.read"))):
         for name, spec in policy.TOOL_REGISTRY.items()}}
 
 
+
+
 class AgentIn(BaseModel):
     name: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9._-]+$")
     provider: str = "internal"
     role: str | None = Field(default=None, max_length=120)
     scope: dict | None = None
     tools: list[str] = Field(default_factory=list)
+    adapter: str = "builtin"          # builtin | openai_compat | cli (SEC-050)
+    adapter_config: dict | None = None
 
 
 @router.post("", status_code=201)
@@ -49,26 +53,35 @@ def create_agent(body: AgentIn, conn: sqlite3.Connection = Depends(db.get_conn),
     bad = [t for t in body.tools if t not in policy.TOOL_REGISTRY]
     if bad:
         raise HTTPException(400, {"code": "unknown_tools", "message": f"unknown tools: {bad}"})
+    if body.adapter not in agent_adapters.ADAPTERS:
+        raise HTTPException(400, {"code": "bad_adapter", "message": f"adapter must be one of {agent_adapters.ADAPTERS}"})
     if db.one(conn, "SELECT id FROM agents WHERE name = ?", (body.name,)):
         raise HTTPException(409, {"code": "exists"})
     now = db.utcnow()
     cur = conn.execute(
-        "INSERT INTO agents (name, provider, role, scope, tools, status, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
-        (body.name, body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools), now, now))
+        "INSERT INTO agents (name, provider, role, scope, tools, status, adapter, adapter_config, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
+        (body.name, body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools),
+         body.adapter, db.jdump(body.adapter_config), now, now))
     conn.commit()
     record_audit(conn, _actor(user), "agent.created", target_type="agent", target_id=str(cur.lastrowid),
-                 detail={"name": body.name, "provider": body.provider, "tools": body.tools})
+                 detail={"name": body.name, "provider": body.provider, "tools": body.tools,
+                         "adapter": body.adapter})
     return db.one(conn, "SELECT * FROM agents WHERE id = ?", (cur.lastrowid,))
+
+
+def _decode_agent(row: dict) -> dict:
+    row["tools"] = db.jload(row.get("tools"), [])
+    row["scope"] = db.jload(row.get("scope"), {})
+    row["adapter"] = row.get("adapter") or "builtin"
+    row["adapter_config"] = db.jload(row.get("adapter_config"), {}) or {}
+    return row
 
 
 @router.get("")
 def list_agents(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Depends(require("agents.read"))):
     rows = db.q(conn, "SELECT * FROM agents ORDER BY name")
-    for r in rows:
-        r["tools"] = db.jload(r.get("tools"), [])
-        r["scope"] = db.jload(r.get("scope"), {})
-    return {"items": rows, "total": len(rows)}
+    return {"items": [_decode_agent(r) for r in rows], "total": len(rows)}
 
 
 @router.patch("/{agent_id}")
@@ -80,16 +93,16 @@ def update_agent(agent_id: int, body: AgentIn, conn: sqlite3.Connection = Depend
     bad = [t for t in body.tools if t not in policy.TOOL_REGISTRY]
     if bad:
         raise HTTPException(400, {"code": "unknown_tools", "message": f"unknown tools: {bad}"})
+    if body.adapter not in agent_adapters.ADAPTERS:
+        raise HTTPException(400, {"code": "bad_adapter", "message": f"adapter must be one of {agent_adapters.ADAPTERS}"})
     conn.execute(
-        "UPDATE agents SET provider = ?, role = ?, scope = ?, tools = ?, updated_at = ? WHERE id = ?",
-        (body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools), db.utcnow(), agent_id))
+        "UPDATE agents SET provider = ?, role = ?, scope = ?, tools = ?, adapter = ?, adapter_config = ?, updated_at = ? WHERE id = ?",
+        (body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools),
+         body.adapter, db.jdump(body.adapter_config), db.utcnow(), agent_id))
     conn.commit()
     record_audit(conn, _actor(user), "agent.updated", target_type="agent", target_id=str(agent_id),
-                 detail={"tools": body.tools})
-    rows = db.one(conn, "SELECT * FROM agents WHERE id = ?", (agent_id,))
-    rows["tools"] = db.jload(rows.get("tools"), [])
-    rows["scope"] = db.jload(rows.get("scope"), {})
-    return rows
+                 detail={"tools": body.tools, "adapter": body.adapter})
+    return _decode_agent(db.one(conn, "SELECT * FROM agents WHERE id = ?", (agent_id,)))
 
 
 # ------------------------------------------------------------------ tasks
@@ -108,8 +121,18 @@ def create_task(body: TaskIn, conn: sqlite3.Connection = Depends(db.get_conn),
         raise HTTPException(404, {"code": "agent_not_found"})
     if agent["status"] != "active":
         raise HTTPException(409, {"code": "agent_inactive"})
+    # Adapter (SEC-050): a free-form {"prompt": ...} request is translated to
+    # explicit tool steps by the agent's adapter, THEN goes through the
+    # standard allowlist/injection/approval gates. Adapter output can never
+    # bypass the gateway (docs/06).
+    request = body.request
+    if "tool" not in request and "steps" not in request:
+        try:
+            request = agent_adapters.resolve_steps(agent, request)
+        except agent_adapters.AdapterError as e:
+            raise HTTPException(400, {"code": "bad_request", "message": str(e)}) from e
     try:
-        plan = policy.plan_task(conn, agent, body.request, _actor(user))
+        plan = policy.plan_task(conn, agent, request, _actor(user))
     except ValueError as e:
         raise HTTPException(400, {"code": "bad_request", "message": str(e)}) from e
 

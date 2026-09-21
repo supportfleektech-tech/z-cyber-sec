@@ -24,7 +24,13 @@ def utcnow() -> str:
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = db_path or settings.db_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30)
+    # check_same_thread=False: FastAPI runs sync dependency setup/teardown in
+    # anyio's LIFO worker pool, and the pool can hand a request's teardown to
+    # a different worker than its setup (e.g. when a background scheduler tick
+    # runs in between). The connection itself is only touched by one request's
+    # sequential operations, so cross-thread close is safe; WAL + busy_timeout
+    # serialize writers across connections.
+    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

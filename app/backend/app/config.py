@@ -27,6 +27,7 @@ class Settings:
     token_ttl_hours: int = 12
     dev_origin: str | None = None
     rules_dir: Path = field(default_factory=lambda: BASE_DIR / "rules")
+    scenarios_dir: Path = field(default_factory=lambda: BASE_DIR / "scenarios")
     frontend_dist: Path = field(default_factory=lambda: BASE_DIR.parent / "frontend" / "dist")
 
     @property

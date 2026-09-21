@@ -1,0 +1,16 @@
+# Purple-team scenario — SSH brute force (validates rule cs-0001)
+# Recorded attack sequence, fully synthetic, purple-team-dedicated host.
+# Rule cs-0001: >=5 failed sshd logins on one host within 300s.
+uid: pt-001
+name: SSH Brute Force
+description: >
+  Six failed SSH logins against a single host within three minutes
+  (MITRE T1110). Expect rule cs-0001 to raise/update an alert.
+expected_rule: cs-0001
+events:
+  - {offset: 0,   host: pt-web-01, user: admin,    action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for admin from 198.51.100.7"}
+  - {offset: 25,  host: pt-web-01, user: root,     action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for root from 198.51.100.7"}
+  - {offset: 50,  host: pt-web-01, user: admin,    action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for admin from 198.51.100.7"}
+  - {offset: 75,  host: pt-web-01, user: operator, action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for operator from 198.51.100.7"}
+  - {offset: 100, host: pt-web-01, user: admin,    action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for admin from 198.51.100.7"}
+  - {offset: 130, host: pt-web-01, user: backup,   action: ssh_failed_login, outcome: failure, severity: low, source_name: sshd, msg: "Failed password for backup from 198.51.100.7"}

@@ -94,6 +94,14 @@ def create_app() -> FastAPI:
     def _startup():
         conn = raw_connection()
         conn.close()
+        # SEC-071: in-process report scheduler (daemon thread, stdlib only).
+        from .services import scheduler
+        scheduler.start()
+
+    @app.on_event("shutdown")
+    def _shutdown():
+        from .services import scheduler
+        scheduler.stop()
 
     return app
 

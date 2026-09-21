@@ -1,0 +1,22 @@
+# Caddy TLS edge for CYBER-SEC production (SEC-061).
+# ACME automatic (HTTP-01) — zero-budget, no self-signed, no manual certs.
+$DOMAIN {
+	encode gzip zstd
+
+	# Rate-limit the login path (brute-force hygiene at the edge)
+	@login path /api/auth/login
+	rate_limit @login {
+		zone cybersec
+		50r/10s
+		by remote_ip
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy cybersec:8080
+}

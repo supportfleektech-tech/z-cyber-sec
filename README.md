@@ -1,8 +1,9 @@
 # CYBER-SEC — Cybersecurity Engineering & Intelligence Lab
 
 **Status:** Implemented v1.0 (modular monolith + React SPA), local-first, zero-budget.
-**Verified:** 97/97 backend tests, ruff clean, SPA builds + served, live smoke checks —
-see `docs/13-verification-evidence.md` for the full evidence log (commands, timestamps, limitations).
+**Verified:** 110/110 backend tests, ruff clean, SPA builds + served, live smoke checks,
+backup/restore rehearsal PASS — see `docs/13-verification-evidence.md` for the full
+evidence log (commands, timestamps, limitations).
 
 > All data in this repository and its default runtime is **synthetic**
 > (`data_class='synthetic'`). No real credentials, real targets, or real
@@ -56,14 +57,17 @@ app/backend/
                          # cloud, grc, exercises, agents, automation, reports, admin, ...)
   app/services/          # detection engine (Sigma-subset), STIX subset parser,
                          # backup, policy, report builder
-  app/migrations/        # 0001_init.sql (full schema)
+  app/migrations/        # 0001_init.sql (full schema) + 0002_extensions.sql (auto-applied)
   app/seed/              # synthetic demo data (explicitly labeled)
-  tests/                 # 97 tests: auth, RBAC, detection, intel, agents, e2e, ...
-app/frontend/            # React 18 + TS + Vite SPA (13 pages; served by backend)
+  scripts/               # load_test.py (SEC-043), backup_rehearsal.py (SEC-063 drill)
+  scenarios/             # purple-team synthetic-attack scenarios (pt-*.yaml, SEC-072)
+  tests/                 # 110 tests: auth, RBAC, detection, intel, agents, e2e, extensions, ...
+  Dockerfile             # multi-stage prod image (non-root, pinned deps, healthcheck)
+app/frontend/            # React 18 + TS + Vite SPA (served by backend)
 docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence
 docs/adr/                # 001–007 architecture decisions
 planning/                # roadmap, backlog, threat scope, workflow
-infra/                   # compose profiles & network design (target-host phase)
+infra/                   # README + local compose, target-host network matrix, prod/Caddy edge
 ```
 
 ## Operating rules (carried into the platform)

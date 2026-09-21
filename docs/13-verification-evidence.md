@@ -116,19 +116,57 @@ First run of `.github/workflows/ci.yml` (PR #1, run 35560868111):
 
 Push and pull_request triggers both fired; both green.
 
+## SEC-050/056/071/072 extension block — Verified, 2026-09-21 ~06:00 UTC
+
+Environment: same sandbox, backend venv (py3.11), branch
+`arena/01a0c152-z-cyber-sec` (uncommitted at time of writing).
+
+| Item | Command | Result |
+|---|---|---|
+| Lint | `ruff check app/ scripts/` | All checks passed |
+| Full test suite | `pytest -q` | 110 passed (97 prior + 13 new in `tests/test_extensions.py`), exit 0, ~74s |
+| New tests | `pytest tests/test_extensions.py` | 13 passed — purple-team pass + rerun dedupe (created→updated) + 404 + audit rows in `audit_events`; coverage `never_fired` flips; saved-search owner scoping (403 cross-owner delete, 400 bad module); schedule lifecycle (create → force-due via `next_run_at` UPDATE → run-due builds 1 report → `last_run_at`/`next_run_at` advance → pause → 400 bogus status → delete); retention report (`due_count`, `legal_hold`, evidence with retention `1d` from 2000); adapters (builtin+prompt→400 "no brain", bad adapter→400, `openai_compat` via monkeypatched `httpx.post` asserting URL + allowlisted tools only, completed+truthful, **bypass attempt denied** — model proposes `create_case` while allowlist has only `summarize_alerts` → status `denied`, "allowlist" in reason, `cli` roundtrip via real subprocess, malformed output→400) |
+| Migration | boot with `0002_extensions.sql` | auto-applied (tests run against it; scheduler tables + adapter columns present) |
+| Frontend build | `npm run build` | `tsc -b && vite build` ✓ 50 modules, `dist/assets/index-Cuz-NSpu.js` 270.09 kB (gzip 75.94 kB) |
+| Backup rehearsal | `python -m scripts.backup_rehearsal` (in-process) | **DRILL: PASS** — backup created, sha256 verified, live DB wiped, production `restore_from` applied, **342/342 events** match baseline, audit chain ok both sides, RTO 0.01s (in-process; live-mode path documented, unrun in sandbox) |
+| Live server smoke (post-restart, migration 0002 auto-applied) | `uvicorn app.main:app` on :8080, cookie-authed curl/python probes | healthz 200; coverage 200 (100%, 0 gaps); PT scenarios listed; **pt-001/002/003 × 3 rounds all HTTP 200, passed=true**; schedule create 201 (`active`); retention report 200 (nested `evidence{}` shape); saved-searches owner-scoped (sasha sees 0 of admin's); SPA serves rebuilt bundle `index-Cuz-NSpu.js` |
+| Bug found by smoke → fixed | pt-003 returned 500: `sqlite3.ProgrammingError … created in a thread can only be used in that same thread` in `db.get_conn` teardown. Root cause: FastAPI runs sync dependency setup/teardown via anyio's LIFO worker pool; a background scheduler tick between a request's work and its teardown moves the teardown to a different worker. Fix: `sqlite3.connect(..., check_same_thread=False)` in `app/db.py` (per-request usage is sequential; WAL + busy_timeout serialize writers). Re-verified: full suite 110 passed + PT ×3×3 all 200. |
+| Docker image build | `docker build -f app/backend/Dockerfile` | **Proposed/unrun** — no docker daemon in this sandbox. COPY paths verified to exist; compose context = repo root (fixed from `infra/`); YAML valid. |
+| CI | pending this block's push | — |
+
+New/changed files: `app/backend/app/migrations/0002_extensions.sql`,
+`app/services/{purple_team,agent_adapters,scheduler,backup,report_builder}.py`,
+`app/routers/{soc,agents,reports,admin}.py`, `app/config.py`, `app/main.py`,
+`app/backend/scenarios/pt-00{1,2,3}-*.yaml`,
+`app/backend/scripts/{backup_rehearsal,load_test}.py`,
+`app/backend/tests/test_extensions.py`, `app/backend/Dockerfile`,
+`infra/prod/{docker-compose.yml,Caddyfile,.env.example.prod}`,
+`infra/network/{nftables.conf,validate_flows.sh}`,
+`.github/workflows/ci.yml` (+supply-chain job, npm audit step),
+`app/frontend/src/{api.ts,pages/{Soc,Reports,Agents}.tsx}`,
+`docs/{12-api-reference,13-verification-evidence}.md`, `gitleaks.toml`.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: measured in-process (see section above); a
   live-uvicorn `--mode http` run and multi-client concurrency are not yet
   exercised.
-- **Restore rehearsal under load (SEC-063)**: backup/restore round-trip is
-  covered by tests; a timed RTO/RPO rehearsal is **Proposed** (Phase 8).
-- **Production deployment (ADR-007)**: all swap boundaries documented, none
-  exercised; staging/production are **Proposed** (roadmap Phases 8–9).
+- **Restore rehearsal (SEC-063)**: in-process drill PASSes (backup → wipe →
+  production restore → 342/342 events + chain intact, RTO 0.01s). The **live**
+  mode (real uvicorn stop/start + `--restart-cmd`) is coded but unrun in this
+  sandbox (needs a live server + server-control env); treat live RTO as
+  **Proposed**.
+- **Production deployment (ADR-007)**: compose/Caddyfile/env templates +
+  Dockerfile + supply-chain CI now exist; the actual staging/production
+  bring-up is **Proposed** (roadmap Phases 8–9) — not exercised here.
+- **Network isolation (SEC-040)**: `infra/network/nftables.conf` +
+  `validate_flows.sh` encode the docs/03 flow matrix; they are for the target
+  host and **unapplied** here (no authorized target host in this sandbox) —
+  treat enforcement as **Proposed/Blocked on a real host**.
 - **Real-Sigma-pack porting**: the engine is a documented subset; no
   linter for out-of-subset rules yet (backlog P2).
-- **Agent real-LLM adapters**: the agent gateway currently executes
-  deterministic local tool steps; OpenCode/OpenClaw/Hermes adapters are
-  scoped (docs/06) but not wired (backlog SEC-050/051).
+- **Agent LLM adapters (SEC-050)**: now wired (builtin/openai_compat/cli) and
+  tested with a stubbed LLM + real subprocess; a live local model end-to-end
+  (e.g. Ollama) is not exercised in this sandbox — **Proposed**.
 - Sandbox workspace restores wipe excluded dirs (`.venv`, `data/`,
   `node_modules`, `dist`); recovery is documented in this file's
   environment section and takes < 5 minutes (venv + pip install +
