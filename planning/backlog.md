@@ -40,7 +40,7 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 - [x] SEC-040 Isolated networks and flow matrix. (Design docs/03 + `infra/network/nftables.conf` + `validate_flows.sh` implement the matrix; host-side apply is a target-host task — unapplied in sandbox, treated as Proposed there)
 - [x] SEC-041 Health checks, logs, metrics, resource limits. (`/api/healthz`, `/metrics`, uvicorn logs; limits = single-process, documented)
 - [x] SEC-042 Backup automation and demonstrated restore. (API-triggered backup w/ sha256; restore with typed confirm; round-trip tested — scheduled cron left to ops, P3)
-- [x] SEC-043 Capacity/load test with expected event volume. (`scripts/load_test.py`: 3.9k ev/s @20k, 6.7k ev/s @50k in-process; `tests/test_capacity.py` fast-suite floor; live-uvicorn http mode pending)
+- [x] SEC-043 Capacity/load test with expected event volume. (`scripts/load_test.py`: in-process 3.9k ev/s @20k, 6.7k ev/s @50k; **live-uvicorn HTTP mode verified: 4,501 ev/s @20k (p95 90ms), GATE PASS**; `tests/test_capacity.py` fast-suite floor)
 - [x] SEC-044 Local deployment/rollback runbook. (docs/08, docs/10)
 
 ## P2 — AI and advanced modules

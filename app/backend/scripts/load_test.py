@@ -117,7 +117,7 @@ def run(mode: str, base_url: str, events_n: int, batch: int) -> dict:
         user = os.environ.get("LOAD_TEST_USER", "admin")
         pw = os.environ.get("LOAD_TEST_PASSWORD")
         assert pw, "set LOAD_TEST_PASSWORD for --mode http (never store it in source)"
-        client = httpx.Client(base_url, timeout=120, follow_redirects=True)
+        client = httpx.Client(base_url=base_url, timeout=120, follow_redirects=True)
         r = client.post("/api/auth/login", json={"username": user, "password": pw})
         assert r.status_code == 200, r.text
         base_dir = None

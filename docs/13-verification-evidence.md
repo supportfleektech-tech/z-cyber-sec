@@ -101,11 +101,17 @@ db_size_bytes: 360448 → 14548992
 
 - Bounded regression guard in the fast suite: `tests/test_capacity.py`
   (2,000 events / 8 batches, <20s floor, detection must fire) — 1.05s
-  locally, part of the 97-test run.
-- `--mode http` measures a live server end-to-end (needs
-  `LOAD_TEST_USER` / `LOAD_TEST_PASSWORD` env vars); not run here.
-- Single-process, single-core-equivalent, in-process (no uvicorn network
-  hop); the in-process ceiling, not the network ceiling, is measured.
+  locally, part of the suite.
+- **Live-uvicorn HTTP mode — Verified 2026-09-21 ~08:35 UTC** (was the last
+  pending part of SEC-043): `--mode http` against a real `uvicorn` instance
+  on 127.0.0.1:8081 with a throwaway seeded DATA_DIR (preview DB untouched):
+  20,000 events → **4,501.2 ev/s** (wall 4.44s), batch p50/p95/p99/max
+  57/90/101/101 ms, 251 detections → 8 alerts, GATE PASS. The network path
+  matches/exceeds the in-process ceiling; `scripts/load_test.py` httpx call
+  fixed for 0.28 keyword-only API.
+- Multi-client concurrency: not exercised (single-client sequential batches
+  already saturate the measured ceiling; revisit only if a concurrency
+  requirement appears — ADR-008 trigger list).
 
 ## CI on GitHub Actions — Verified (2026-09-21 ~04:22 UTC)
 
@@ -197,9 +203,9 @@ keyword-only API), and `pgrep -f uvicorn` matching the drill's own argv
 process + its ancestor chain.
 
 ## Known limitations & blocked items
-- **Capacity (SEC-043)**: measured in-process (see section above); a
-  live-uvicorn `--mode http` run and multi-client concurrency are not yet
-  exercised.
+- **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
+  live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency
+  remains unexercised (no requirement today; ADR-008 trigger list governs).
 - **Restore rehearsal (SEC-063)**: **both modes verified** — in-process
   (342/342, RTO 0.01s) and live (423/423, RTO 16.68s, real server
   stop/start). Live-mode RTO on this host, small dataset; production RTO
