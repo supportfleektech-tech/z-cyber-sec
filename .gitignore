@@ -1,0 +1,34 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Runtime data (local-first, synthetic by default)
+app/backend/data/
+backups/
+evidence-private/
+audit-private/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+
+# OS
+.DS_Store
+
+# Generated test data + tsc incremental info
+app/backend/tests/.testdata/
+*.tsbuildinfo

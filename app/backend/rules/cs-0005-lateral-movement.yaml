@@ -1,0 +1,14 @@
+uid: cs-0005
+name: Lateral Movement
+description: >
+  Successful SMB/RDP/PsExec authentication to another host. MITRE T1021.
+severity: high
+status: active
+detection:
+  smb:
+    action: auth_success
+    data.method: ["smb", "psexec", "wmi"]
+  rdp:
+    action: rdp_login
+    outcome: success
+condition: smb or rdp

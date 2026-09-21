@@ -1,0 +1,346 @@
+"""SOC: event ingestion (idempotent), alert triage, detection rules.
+
+SEC-022 audit pipeline, SEC-030/031 telemetry+detections, SEC-032 triage.
+"""
+from __future__ import annotations
+
+import sqlite3
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
+
+from .. import db
+from ..audit import record_audit
+from ..deps import require
+from ..services.detection import RuleError, compile_rule, evaluate_batch
+
+router = APIRouter(prefix="/api/soc", tags=["soc"])
+
+SEVERITIES = {"critical", "high", "medium", "low", "info"}
+ALERT_STATUSES = {"new", "triaging", "confirmed", "dismissed", "closed"}
+
+
+class EventIn(BaseModel):
+    ts: str = Field(min_length=4, max_length=40)
+    source_type: str | None = None
+    source_name: str | None = None
+    host: str | None = None
+    user: str | None = None
+    action: str | None = None
+    outcome: str | None = None
+    severity: str | None = None
+    msg: str | None = Field(default=None, max_length=2000)
+    data: dict[str, Any] | None = None
+    data_class: str = "synthetic"
+    idempotency_key: str | None = Field(default=None, max_length=160)
+
+    @field_validator("data_class")
+    @classmethod
+    def _dc(cls, v):
+        if v not in {"synthetic", "verified"}:
+            raise ValueError("data_class must be synthetic|verified")
+        return v
+
+    @field_validator("severity")
+    @classmethod
+    def _sev(cls, v):
+        if v is not None and v.lower() not in SEVERITIES:
+            raise ValueError("bad severity")
+        return v.lower() if v else v
+
+
+class BatchIn(BaseModel):
+    events: list[EventIn] = Field(min_length=1, max_length=5000)
+
+
+def _actor(user: dict) -> dict:
+    return {"type": "user", "id": str(user["user_id"]), "name": user["username"]}
+
+
+@router.post("/events", status_code=201)
+def ingest_events(batch: BatchIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                  user: dict = Depends(require("soc.write"))):
+    """Idempotent batch ingest. Duplicate idempotency_key -> skipped, not error."""
+    inserted, skipped = 0, 0
+    new_events: list[dict] = []
+    for e in batch.events:
+        d = e.model_dump()
+        if d["idempotency_key"] and db.one(conn, "SELECT id FROM events WHERE idempotency_key = ?",
+                                           (d["idempotency_key"],)):
+            skipped += 1
+            continue
+        cur = conn.execute(
+            "INSERT INTO events (idempotency_key, ts, source_type, source_name, host, user, action, "
+            "outcome, severity, msg, data, data_class, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (d["idempotency_key"], d["ts"], d["source_type"], d["source_name"], d["host"], d["user"],
+             d["action"], d["outcome"], d["severity"], d["msg"], db.jdump(d["data"]), d["data_class"],
+             db.utcnow()),
+        )
+        d["id"] = int(cur.lastrowid)
+        new_events.append(d)
+        inserted += 1
+    conn.commit()
+
+    alerts = _run_detections(conn, new_events)
+    record_audit(conn, _actor(user), "soc.events.ingested", target_type="events",
+                 detail={"inserted": inserted, "skipped": skipped, "alerts": len(alerts)})
+    return {"inserted": inserted, "skipped": skipped, "alerts": alerts}
+
+
+def _run_detections(conn: sqlite3.Connection, events: list[dict],
+                    threshold_context: list[dict] | None = None) -> list[dict]:
+    """Evaluate active rules. `events` are the candidate events for non-threshold
+    rules; `threshold_context` is the window used for threshold rules."""
+    if not events:
+        return []
+    rules = db.q(conn, "SELECT * FROM detection_rules WHERE status = 'active'")
+    raised = []
+    for r in rules:
+        spec = db.jload(r["spec"], {})
+        try:
+            rule = compile_rule(spec)
+        except RuleError:
+            continue
+        if rule.requires_threshold:
+            ctx = threshold_context if threshold_context is not None else db.q(
+                conn, "SELECT id, ts, host, user, action, outcome, severity, source_name, source_type, data FROM events "
+                      "ORDER BY ts DESC LIMIT 5000")
+            recent = ctx
+        else:
+            recent = events
+        for group in evaluate_batch(rule, recent, new_ids={e["id"] for e in events}):
+            # Dedupe: one open alert per (rule, entity) — entity encoded in title.
+            entity = group.get("entity")
+            title = f"{rule.name}" + (f" — {entity}" if entity else "")
+            existing = db.one(conn, "SELECT id FROM alerts WHERE rule_id = ? AND title = ? "
+                                    "AND status IN ('new','triaging','confirmed') "
+                                    "ORDER BY last_seen DESC LIMIT 1",
+                              (r["id"], title))
+            if existing:
+                cur = db.one(conn, "SELECT * FROM alerts WHERE id = ?", (existing["id"],))
+                merged = list(dict.fromkeys((db.jload(cur["event_ids"], []) or []) + group["event_ids"]))[:500]
+                conn.execute(
+                    "UPDATE alerts SET count = ?, last_seen = ?, event_ids = ?, updated_at = ? WHERE id = ?",
+                    (group["count"], group["last_seen"], db.jdump(merged), db.utcnow(), existing["id"]),
+                )
+                conn.commit()
+                raised.append({"id": cur["id"], "title": title, "severity": cur["severity"],
+                               "status": "updated", "count": group["count"]})
+            else:
+                cur = conn.execute(
+                    "INSERT INTO alerts (rule_id, uid, title, severity, status, event_ids, first_seen, "
+                    "last_seen, count, created_at, updated_at) VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)",
+                    (r["id"], rule.uid, title, rule.severity, db.jdump(group["event_ids"]),
+                     group["first_seen"], group["last_seen"], group["count"], db.utcnow(), db.utcnow()),
+                )
+                conn.commit()
+                raised.append({"id": int(cur.lastrowid), "title": title, "severity": rule.severity,
+                               "status": "created", "count": group["count"]})
+    if raised:
+        # Hook automation playbooks (trigger: on_alert:<severity>)
+        try:
+            from .automation import _trigger_on_alert
+            _trigger_on_alert(conn, raised)
+        except Exception:  # automation must never break ingest
+            pass
+    return raised
+
+
+@router.get("/events")
+def list_events(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Depends(require("soc.read")),
+                host: str | None = None, user_name: str | None = None, action: str | None = None,
+                from_ts: str | None = None, to_ts: str | None = None,
+                data_class: str | None = None,
+                page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500)):
+    where, params = ["1=1"], []
+    if host:
+        where.append("host = ?")
+        params.append(host)
+    if user_name:
+        where.append("user = ?")
+        params.append(user_name)
+    if action:
+        where.append("action = ?")
+        params.append(action)
+    if from_ts:
+        where.append("ts >= ?")
+        params.append(from_ts)
+    if to_ts:
+        where.append("ts <= ?")
+        params.append(to_ts)
+    if data_class:
+        where.append("data_class = ?")
+        params.append(data_class)
+    sql = ("SELECT id, ts, source_type, source_name, host, user, action, outcome, severity, msg, "
+           "data, data_class FROM events WHERE " + " AND ".join(where))
+    return db.paged(conn, sql, tuple(params), "ORDER BY ts DESC, id DESC", page, page_size)
+
+
+class AlertUpdate(BaseModel):
+    status: str | None = None
+    assigned_to: str | None = Field(default=None, max_length=100)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+@router.get("/alerts")
+def list_alerts(conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("soc.read")),
+                status: str | None = Query(default=None), severity: str | None = None,
+                q: str | None = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=500)):
+    where, params = [], []
+    if status:
+        where.append("a.status = ?")
+        params.append(status)
+    if severity:
+        where.append("a.severity = ?")
+        params.append(severity)
+    if q:
+        where.append("(a.title LIKE ? OR r.name LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    sql = ("SELECT a.id, a.title, a.severity, a.status, a.count, a.first_seen, a.last_seen, "
+           "a.assigned_to, r.name AS rule_name, r.uid AS rule_uid, a.case_id "
+           "FROM alerts a LEFT JOIN detection_rules r ON r.id = a.rule_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return db.paged(conn, sql, tuple(params), "ORDER BY a.first_seen DESC, a.id DESC", page, page_size)
+
+
+@router.get("/alerts/{alert_id}")
+def get_alert(alert_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
+              user: dict = Depends(require("soc.read"))):
+    a = db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,))
+    if not a:
+        raise HTTPException(404, {"code": "not_found"})
+    events = db.q(conn, "SELECT id, ts, host, user, action, outcome, severity, msg, data "
+                        "FROM events WHERE id IN (%s) ORDER BY ts" %
+                        ",".join("?" * len(db.jload(a["event_ids"], []))),
+                        tuple(db.jload(a["event_ids"], [])))
+    return {"alert": a, "events": events[:100]}
+
+
+@router.patch("/alerts/{alert_id}")
+def update_alert(alert_id: int, body: AlertUpdate, conn: sqlite3.Connection = Depends(db.get_conn),
+                 user: dict = Depends(require("soc.write"))):
+    a = db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,))
+    if not a:
+        raise HTTPException(404, {"code": "not_found"})
+    if body.status is not None and body.status not in ALERT_STATUSES:
+        raise HTTPException(400, {"code": "bad_status"})
+    fields, params = [], []
+    if body.status is not None:
+        fields.append("status = ?")
+        params.append(body.status)
+    if body.assigned_to is not None:
+        fields.append("assigned_to = ?")
+        params.append(body.assigned_to)
+    if body.notes is not None:
+        fields.append("notes = ?")
+        params.append(body.notes)
+    if not fields:
+        raise HTTPException(400, {"code": "no_changes"})
+    fields.append("updated_at = ?")
+    params.append(db.utcnow())
+    params.append(alert_id)
+    conn.execute(f"UPDATE alerts SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    record_audit(conn, _actor(user), "alert.updated", target_type="alert", target_id=str(alert_id),
+                 detail={k: v for k, v in body.model_dump().items() if v is not None})
+    return db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,))
+
+
+# ------------------------------------------------------------- detection rules
+
+class RuleIn(BaseModel):
+    uid: str = Field(min_length=3, max_length=64)
+    name: str = Field(min_length=3, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    severity: str = "medium"
+    status: str = "active"
+    spec: dict[str, Any]
+
+
+@router.post("/rules", status_code=201)
+def create_rule(body: RuleIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("rules.write"))):
+    spec = {**body.spec, "uid": body.uid, "name": body.name,
+            "description": body.description, "severity": body.severity, "status": body.status}
+    try:
+        compile_rule(spec)
+    except RuleError as e:
+        raise HTTPException(400, {"code": "bad_rule", "message": str(e)}) from e
+    if db.one(conn, "SELECT id FROM detection_rules WHERE uid = ?", (body.uid,)):
+        raise HTTPException(409, {"code": "exists"})
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO detection_rules (uid, name, description, severity, status, spec, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (body.uid, body.name, body.description, body.severity, body.status, db.jdump(spec), now, now),
+    )
+    conn.commit()
+    record_audit(conn, _actor(user), "rule.created", target_type="detection_rule",
+                 target_id=str(cur.lastrowid), detail={"uid": body.uid, "severity": body.severity})
+    return db.one(conn, "SELECT * FROM detection_rules WHERE id = ?", (cur.lastrowid,))
+
+
+@router.get("/rules")
+def list_rules(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Depends(require("soc.read"))):
+    rows = db.q(conn, "SELECT id, uid, name, description, severity, status, updated_at FROM detection_rules ORDER BY uid")
+    return {"items": rows, "total": len(rows)}
+
+
+@router.patch("/rules/{rule_id}")
+def update_rule(rule_id: int, body: RuleIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("rules.write"))):
+    r = db.one(conn, "SELECT * FROM detection_rules WHERE id = ?", (rule_id,))
+    if not r:
+        raise HTTPException(404, {"code": "not_found"})
+    spec = {**body.spec, "uid": body.uid, "name": body.name,
+            "description": body.description, "severity": body.severity, "status": body.status}
+    try:
+        compile_rule(spec)
+    except RuleError as e:
+        raise HTTPException(400, {"code": "bad_rule", "message": str(e)}) from e
+    conn.execute("UPDATE detection_rules SET name=?, description=?, severity=?, status=?, spec=?, updated_at=? WHERE id=?",
+                 (body.name, body.description, body.severity, body.status, db.jdump(spec), db.utcnow(), rule_id))
+    conn.commit()
+    record_audit(conn, _actor(user), "rule.updated", target_type="detection_rule", target_id=str(rule_id))
+    return db.one(conn, "SELECT * FROM detection_rules WHERE id = ?", (rule_id,))
+
+
+@router.post("/detections/backfill")
+def backfill_detections(conn: sqlite3.Connection = Depends(db.get_conn),
+                        user: dict = Depends(require("rules.write"))):
+    """Re-run active rules over all stored events (e.g. after adding a rule).
+    Open-alert dedup prevents duplicate alert spam."""
+    events = db.q(conn, "SELECT id, ts, host, user, action, outcome, severity, source_name, source_type, data FROM events "
+                        "ORDER BY ts LIMIT 20000")
+    raised = _run_detections(conn, events, threshold_context=events)
+    created = [a for a in raised if a["status"] == "created"]
+    updated = [a for a in raised if a["status"] == "updated"]
+    record_audit(conn, _actor(user), "detections.backfilled", target_type="detections",
+                 detail={"events": len(events), "created": len(created), "updated": len(updated)})
+    # Backfill surfaces NEW alerts only; refreshes of existing open alerts are
+    # reported in the count, not re-raised (prevents alert spam on re-runs).
+    return {"events_checked": len(events), "alerts": created, "updated": len(updated)}
+
+
+class RuleDryRun(BaseModel):
+    rule_id: int
+    event_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+@router.post("/rules/dry-run")
+def rule_dry_run(body: RuleDryRun, conn: sqlite3.Connection = Depends(db.get_conn),
+                 user: dict = Depends(require("soc.read"))):
+    r = db.one(conn, "SELECT * FROM detection_rules WHERE id = ?", (body.rule_id,))
+    if not r:
+        raise HTTPException(404, {"code": "not_found"})
+    try:
+        rule = compile_rule(db.jload(r["spec"], {}))
+    except RuleError as e:
+        raise HTTPException(400, {"code": "bad_rule", "message": str(e)}) from e
+    events = db.q(conn, "SELECT id, ts, host, user, action, outcome, severity, source_name, source_type, data FROM events "
+                        "WHERE id IN (%s)" % ",".join("?" * len(body.event_ids)), tuple(body.event_ids))
+    groups = evaluate_batch(rule, events)
+    return {"rule_uid": r["uid"], "events_checked": len(events), "alert_groups": groups}

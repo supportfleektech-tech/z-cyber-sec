@@ -1,0 +1,203 @@
+"""Admin: integrations, feature flags, settings, audit log, backups."""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from .. import db
+from ..audit import record_audit, verify_chain
+from ..deps import require
+from ..services.backup import create_backup, restore_from, verify_bundle
+
+router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+def _actor(user: dict) -> dict:
+    return {"type": "user", "id": str(user["user_id"]), "name": user["username"]}
+
+
+# ------------------------------------------------------------- integrations
+
+class IntegrationIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    kind: str = "manual"
+    config: dict | None = Field(default=None, description="Must NOT contain secrets (secret scan in CI + review).")
+    provenance: str | None = Field(default=None, max_length=500)
+
+
+def _reject_secrets(obj, path="$") -> str | None:
+    """Defensive: refuse integration configs that look like they carry secrets."""
+    bad_keys = ("password", "secret", "token", "api_key", "apikey", "private_key")
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if any(b in k.lower() for b in bad_keys):
+                return f"{path}.{k}"
+            r = _reject_secrets(v, f"{path}.{k}")
+            if r:
+                return r
+    return None
+
+
+@router.post("/integrations", status_code=201)
+def create_integration(body: IntegrationIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                       user: dict = Depends(require("admin.integrations"))):
+    leak = _reject_secrets(body.config or {})
+    if leak:
+        raise HTTPException(400, {"code": "secret_in_config", "message": f"field {leak} looks like a secret; "
+                                                                          "secrets are not stored in the platform."})
+    if db.one(conn, "SELECT id FROM integrations WHERE name = ?", (body.name,)):
+        raise HTTPException(409, {"code": "exists"})
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO integrations (name, kind, status, config, provenance, created_at, updated_at) "
+        "VALUES (?, ?, 'unknown', ?, ?, ?, ?)",
+        (body.name, body.kind, db.jdump(body.config), body.provenance, now, now))
+    conn.commit()
+    record_audit(conn, _actor(user), "integration.created", target_type="integration",
+                 target_id=str(cur.lastrowid), detail={"name": body.name, "kind": body.kind})
+    return db.one(conn, "SELECT * FROM integrations WHERE id = ?", (cur.lastrowid,))
+
+
+@router.get("/integrations")
+def list_integrations(conn: sqlite3.Connection = Depends(db.get_conn),
+                      user: dict = Depends(require("admin.integrations"))):
+    rows = db.q(conn, "SELECT * FROM integrations ORDER BY name")
+    for r in rows:
+        r["config"] = db.jload(r.get("config"), {})
+    return {"items": rows, "total": len(rows)}
+
+
+class IntegrationHealthIn(BaseModel):
+    status: str  # ok | degraded | down | unknown
+    last_status: str | None = Field(default=None, max_length=400)
+
+
+@router.post("/integrations/{int_id}/health")
+def integration_health(int_id: int, body: IntegrationHealthIn,
+                       conn: sqlite3.Connection = Depends(db.get_conn),
+                       user: dict = Depends(require("admin.integrations"))):
+    i = db.one(conn, "SELECT * FROM integrations WHERE id = ?", (int_id,))
+    if not i:
+        raise HTTPException(404, {"code": "not_found"})
+    if body.status not in {"ok", "degraded", "down", "unknown"}:
+        raise HTTPException(400, {"code": "bad_status"})
+    conn.execute("UPDATE integrations SET status = ?, last_run_at = ?, last_status = ?, updated_at = ? WHERE id = ?",
+                 (body.status, db.utcnow(), body.last_status, db.utcnow(), int_id))
+    conn.commit()
+    record_audit(conn, _actor(user), "integration.health", target_type="integration", target_id=str(int_id),
+                 detail={"status": body.status})
+    return db.one(conn, "SELECT * FROM integrations WHERE id = ?", (int_id,))
+
+
+# ------------------------------------------------------------ feature flags
+
+class FlagIn(BaseModel):
+    key: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9._-]+$")
+    value: bool
+    description: str | None = Field(default=None, max_length=300)
+
+
+@router.post("/flags")
+def set_flag(body: FlagIn, conn: sqlite3.Connection = Depends(db.get_conn),
+             user: dict = Depends(require("admin.flags"))):
+    conn.execute(
+        "INSERT INTO feature_flags (key, value, description, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, description = COALESCE(excluded.description, description), "
+        "updated_at = excluded.updated_at",
+        (body.key, int(body.value), body.description, db.utcnow()))
+    conn.commit()
+    record_audit(conn, _actor(user), "flag.set", target_type="feature_flag", target_id=body.key,
+                 detail={"value": body.value})
+    return {"key": body.key, "value": body.value}
+
+
+@router.get("/flags")
+def list_flags(conn: sqlite3.Connection = Depends(db.get_conn),
+               user: dict = Depends(require("admin.flags"))):
+    rows = db.q(conn, "SELECT * FROM feature_flags ORDER BY key")
+    return {"items": rows, "total": len(rows)}
+
+
+# ------------------------------------------------------------------ settings
+
+class SettingIn(BaseModel):
+    value: str = Field(max_length=2000)
+
+
+@router.get("/settings")
+def list_settings(conn: sqlite3.Connection = Depends(db.get_conn),
+                  user: dict = Depends(require("admin.flags"))):
+    rows = db.q(conn, "SELECT * FROM settings ORDER BY key")
+    return {"items": rows, "total": len(rows)}
+
+
+@router.put("/settings/{key}")
+def put_setting(key: str, body: SettingIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("admin.flags"))):
+    conn.execute(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, body.value, db.utcnow()))
+    conn.commit()
+    record_audit(conn, _actor(user), "setting.set", target_type="setting", target_id=key)
+    return {"key": key, "value": body.value}
+
+
+# ------------------------------------------------------------------ audit log
+
+@router.get("/audit")
+def list_audit(conn: sqlite3.Connection = Depends(db.get_conn),
+               user: dict = Depends(require("audit.read")),
+               action: str | None = None, actor: str | None = None,
+               page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=1000)):
+    where, params = ["1=1"], []
+    if action:
+        where.append("action LIKE ?")
+        params.append(f"{action}%")
+    if actor:
+        where.append("actor_name = ?")
+        params.append(actor)
+    sql = "SELECT * FROM audit_events WHERE " + " AND ".join(where)
+    return db.paged(conn, sql, tuple(params), "ORDER BY seq DESC", page, page_size)
+
+
+@router.get("/audit/verify")
+def verify(conn: sqlite3.Connection = Depends(db.get_conn),
+           user: dict = Depends(require("audit.read"))):
+    """Integrity check of the hash chain (tamper evidence)."""
+    return verify_chain(conn)
+
+
+# -------------------------------------------------------------------- backup
+
+@router.post("/backup")
+def backup(conn: sqlite3.Connection = Depends(db.get_conn),
+           user: dict = Depends(require("admin.backup"))):
+    return create_backup(conn, _actor(user))
+
+
+class RestoreIn(BaseModel):
+    path: str
+    confirm: str = Field(default="", description="Must be the literal 'RESTORE' to proceed.")
+
+
+@router.post("/backup/restore")
+def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
+            user: dict = Depends(require("admin.backup"))):
+    if body.confirm != "RESTORE":
+        raise HTTPException(400, {"code": "confirm_required",
+                                  "message": "Set confirm='RESTORE' — this replaces live data."})
+    path = Path(body.path)
+    if not path.exists() or "backups" not in str(path):
+        raise HTTPException(400, {"code": "bad_path", "message": "path must point into the backups directory"})
+    v = verify_bundle(None, path)
+    if not v["ok"]:
+        raise HTTPException(409, {"code": "verify_failed", "message": str(v.get("bad"))})
+    # Quiesce: close all per-request connections for this process, then restore.
+    import app.db as dbmod
+    with dbmod._lock:
+        result = restore_from(path, _actor(user))
+    return result

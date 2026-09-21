@@ -1,43 +1,119 @@
 # CYBER-SEC — Cybersecurity Engineering & Intelligence Lab
 
-**Package:** Implementation Blueprint v1.0  
-**Date:** 2026-09-17  
-**Deployment starting point:** Existing Pop!_OS host, local-first  
-**Agent tools:** OpenCode, OpenClaw, Hermes
+**Status:** Implemented v1.0 (modular monolith + React SPA), local-first, zero-budget.
+**Verified:** 96/96 backend tests, ruff clean, SPA builds + served, live smoke checks —
+see `docs/13-verification-evidence.md` for the full evidence log (commands, timestamps, limitations).
 
-> This repository is a build blueprint and starter scaffold. It is not evidence that any services have been installed, tested, or deployed.
+> All data in this repository and its default runtime is **synthetic**
+> (`data_class='synthetic'`). No real credentials, real targets, or real
+> telemetry. Production is a separately hardened deployment (ADR-007), not
+> this host.
 
 ## Mission
-Build a modular, secure, reproducible local cybersecurity lab and operations platform, with a path to a separately hardened production deployment.
 
-## Capability scope
-1. SOC & Blue Team
-2. Incident Response & Forensics
-3. Threat Intelligence
-4. Application Security
-5. Cloud Security
-6. Network Security
-7. Vulnerability Management
-8. GRC & Compliance
-9. Authorized Red Team / CTF
-10. Security Engineering & Automation
-11. Cybersecurity AI Agents
+A modular, secure, reproducible local cybersecurity lab and operations
+platform, with a documented path to a separately hardened production
+deployment.
 
-## Quick start
-1. Read `docs/00-source-and-status.md`.
-2. Read `docs/01-host-audit.md`.
-3. Complete the audit before changing existing services.
-4. Review `docs/02-architecture.md` and `docs/03-network-design.md`.
-5. Work through `planning/roadmap.md` and `planning/backlog.md`.
-6. Use `agents/MASTER_BUILD_PROMPT.md` with your coding agents.
-7. Do not use `infra/compose/compose.yaml` until its placeholders, ports, storage, and security have been reviewed.
+## Capability scope (all implemented as modules)
 
-## Status vocabulary
-- **Verified:** directly observed in the current environment during a recorded audit.
-- **Previously reported:** supplied in earlier conversation; requires revalidation.
-- **Proposed:** intended design, not deployed.
-- **Unknown:** must be investigated.
-- **Blocked:** requires access, approval, budget, or external dependency.
+SOC & Blue Team · Incident Response & Forensics · Threat Intelligence ·
+Application Security · Cloud Security · Network Security (design) ·
+Vulnerability Management · GRC & Compliance · Authorized Red Team / CTF
+(exercises) · Security Engineering & Automation · Cybersecurity AI Agents
+(governed gateway)
 
-## Safety
-Only assess systems you own or have explicit authorization to test. Keep vulnerable targets isolated. No public exposure of exercise targets. Require human approval for production changes, destructive operations, external testing, and consequential containment actions.
+## Quick start (local, ~3 minutes)
+
+```bash
+# Backend (Python 3.11)
+cd app/backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m app.seed.seed_demo        # synthetic users, events, findings
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
+
+# Frontend (Node 20) — optional; backend serves dist/ when present
+cd app/frontend
+npm install && npm run build
+```
+
+Open `http://localhost:8080/` — default lab login **admin /
+`CyberSecAdmin1!`** (synthetic; rotate before any non-LOCAL environment).
+Interactive API docs: `/api/docs`.
+
+## Layout
+
+```
+app/backend/
+  app/main.py            # FastAPI app: API routers + SPA serving (single origin)
+  app/config.py          # env-driven settings; refuses dev SECRET_KEY in STAGING/PROD
+  app/db.py              # single data-access boundary (SQLite WAL; PG swap point, ADR-007)
+  app/security.py        # PBKDF2 passwords, server-side sessions, cookie policy
+  app/audit.py           # append-only hash-chained audit log + chain verify
+  app/deps.py            # require("<permission>") RBAC dependency
+  app/routers/           # one module per domain (soc, cases, intel, vulns, appsec,
+                         # cloud, grc, exercises, agents, automation, reports, admin, ...)
+  app/services/          # detection engine (Sigma-subset), STIX subset parser,
+                         # backup, policy, report builder
+  app/migrations/        # 0001_init.sql (full schema)
+  app/seed/              # synthetic demo data (explicitly labeled)
+  tests/                 # 96 tests: auth, RBAC, detection, intel, agents, e2e, ...
+app/frontend/            # React 18 + TS + Vite SPA (13 pages; served by backend)
+docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence
+docs/adr/                # 001–007 architecture decisions
+planning/                # roadmap, backlog, threat scope, workflow
+infra/                   # compose profiles & network design (target-host phase)
+```
+
+## Operating rules (carried into the platform)
+
+- **Synthetic data by default**; real data only behind explicit labeling.
+- **Least privilege RBAC**: 5 roles, named permissions per endpoint;
+  viewers cannot download reports/evidence; `agent_service` is scoped.
+- **Agents cannot waive their own guardrails**: read-only tools run
+  immediately, consequential tools require a human approval (queue +
+  comment), out-of-allowlist tools are denied, and every tool call is
+  audited (docs/06, `/api/agents/evals/run` harness).
+- **Audit is hash-chained and append-only**; `GET /api/admin/audit/verify`
+  proves the chain.
+- **Human approval gates** for production changes, destructive operations,
+  containment, and external testing — the UI enforces confirm text
+  (e.g. restore requires typing `RESTORE`).
+- **Secrets** never in repo/prompts/logs: `.env` gitignored,
+  `.env.example` committed, boot guard refuses dev defaults outside
+  `LOCAL`/`LAB` (ADR-006).
+
+## Tests & CI
+
+```bash
+cd app/backend && .venv/bin/python -m pytest -q     # 96 tests
+cd app/backend && .venv/bin/ruff check app/         # lint
+cd app/frontend && npm run build                    # tsc -b && vite build
+```
+
+GitHub Actions (`.github/workflows/ci.yml`): backend job (ruff + pytest)
+and frontend job (typecheck + build) on every push/PR.
+
+## Documentation index
+
+| Doc | Content |
+|---|---|
+| [00](docs/00-source-and-status.md) | Source basis, provenance labels, status |
+| [01](docs/01-host-audit.md) | Host audit (pre-change baseline) |
+| [02](docs/02-architecture.md) | Architecture overview |
+| [03](docs/03-network-design.md) | Network zones & flow matrix |
+| [04](docs/04-data-model.md) | Data model |
+| [05](docs/05-threat-model.md) | Threat model & authorized scope |
+| [06](docs/06-agent-governance.md) | Agent governance & guardrails |
+| [07](docs/07-testing.md) | Testing strategy |
+| [08](docs/08-deployment-local.md) | Local deployment |
+| [09](docs/09-production.md) | Production path |
+| [10](docs/10-operations-runbook.md) | Operations runbook |
+| [11](docs/11-frontend-spa.md) | Frontend SPA |
+| [12](docs/12-api-reference.md) | API reference (all endpoints, error model, audit) |
+| [13](docs/13-verification-evidence.md) | Verification & evidence log |
+| [ADR 001–007](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production |
+
+Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·
+Backlog: [`planning/backlog.md`](planning/backlog.md)
