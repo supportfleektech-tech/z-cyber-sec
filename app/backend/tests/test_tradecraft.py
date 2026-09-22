@@ -404,13 +404,41 @@ def test_duplicates_cluster_by_fingerprint(client, seeded):
     assert len(clusters[0]["reviews"]) == 2
 
 
-def test_fingerprint_ignores_severity_wording_and_ports(client, seeded):
-    f1 = tradecraft._fingerprint("https://lab-web-01:8443/x", None, "SQL Injection (critical)")
-    f2 = tradecraft._fingerprint("lab-web-01", None, "sql injection")
-    assert f1 != f2  # different shape (extra token is dropped below length 4, url noise is not)
-    same = tradecraft._fingerprint("lab-web-01", None, "SQL Injection in report filter")
-    same2 = tradecraft._fingerprint("lab-web-01", None, "SQL Injection in report filter")
-    assert same == same2
+def test_fingerprint_is_invariant_under_presentation_noise():
+    """The dedupe key must survive how a human typed the submission, or the
+    same finding lands in two clusters and the feature does nothing."""
+    pairs = [
+        (("https://lab-web-01:8443/x", "SQL Injection (critical)"),
+         ("lab-web-01", "sql injection")),                     # scheme/port/path + severity
+        (("lab-web-01", "Reflected XSS - high severity"),
+         ("lab-web-01", "reflected xss")),                     # severity wording
+        (("10.42.0.10:8080", "Broken Access Control"),
+         ("10.42.0.10", "access control broken")),             # port + word order
+    ]
+    for (t1, ti1), (t2, ti2) in pairs:
+        assert tradecraft._fingerprint(t1, None, ti1) == tradecraft._fingerprint(t2, None, ti2), \
+            f"{ti1!r}@{t1} should match {ti2!r}@{t2}"
+
+
+def test_fingerprint_still_separates_genuinely_different_findings():
+    base = tradecraft._fingerprint("lab-web-01", None, "SQL Injection")
+    assert base != tradecraft._fingerprint("lab-web-02", None, "SQL Injection")   # other host
+    assert base != tradecraft._fingerprint("lab-web-01", None, "Stored XSS")      # other weakness
+    cve = tradecraft._fingerprint("lab-web-01", {"cve_id": "CVE-2021-44228"}, None)
+    assert cve != base                                                            # other CVE
+
+
+def test_duplicate_cluster_survives_url_vs_host_submission(client, seeded, conn):
+    """End-to-end version of the same claim: two submissions of one finding,
+    typed differently, must cluster."""
+    _authorized_exercise(seeded)
+    fid = _finding(seeded)
+    client.post("/api/tradecraft/reviews",
+                json={**GOOD_REVIEW, "vuln_id": fid, "target": "https://10.42.0.10:8443/admin"})
+    client.post("/api/tradecraft/reviews",
+                json={**GOOD_REVIEW, "vuln_id": fid, "target": "10.42.0.10"})
+    clusters = client.get("/api/tradecraft/duplicates").json()["clusters"]
+    assert len(clusters) == 1 and clusters[0]["count"] == 2
 
 
 # ------------------------------------------------------------------- personas

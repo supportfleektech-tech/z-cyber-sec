@@ -29,7 +29,7 @@ interface Schedule {
   created_by: string;
 }
 
-const KINDS = ["overview", "soc", "cases", "intel", "vulns"];
+const KINDS = ["overview", "soc", "cases", "intel", "vulns", "tradecraft"];
 
 export default function Reports() {
   const [flash, flashShow] = useFlash();

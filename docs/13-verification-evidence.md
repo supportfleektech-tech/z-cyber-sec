@@ -408,9 +408,35 @@ and wrote review id 3 with `reviewed_by: agent`, verdict `exploitable`, and the
 backticks **preserved intact** in the stored reproduction text. The approval
 vocabulary is `approve`/`reject` (`bad_decision` on anything else).
 
-Suite: **212 passed** (191 + 21 new in `tests/test_hardening_followups.py`),
-ruff clean; frontend typecheck + build green (289.40 kB / 80.68 kB gzip).
-Duplicate clusters now have a UI panel on `/tradecraft`.
+**Defect found by auditing a claim in the new code:** `_fingerprint`'s
+docstring promised that URL/port noise and severity wording would not change
+the dedupe key, but it only lower-cased the target and kept severity words —
+so the same finding submitted as ``https://lab-web-01:8443/x "SQL Injection
+(critical)"`` and ``lab-web-01 "sql injection"`` landed in **two** clusters,
+i.e. the signal-to-noise feature silently did nothing for the most common
+re-submission. Fixed: the target is normalised exactly as scope matching
+normalises it, and severity vocabulary (`critical`…`info`, `severity`) is
+dropped from the title words. Five cases verified: scheme/port/path,
+severity wording and word order all collapse to one key, while a different
+host, a different weakness or a different CVE stay separate.
+
+**Stale release gate found and corrected:** `docs/14` still instructed the
+approver to verify "Login rate limit … at the edge (Caddyfile: 50r/10s per
+IP)" — a control SEC-073 moved into the application. An approver following the
+checklist would have looked for it in the Caddyfile, not found it, and either
+ticked the box anyway or blocked the release. The checklist now carries the
+command-level in-app check, plus the SEC-073/074/075 gates (Caddyfile loads on
+the stock image, `/metrics` 403 on the edge, JSON 404 for unknown API paths,
+`lint_rules` exit 0, tradecraft scope + audit check).
+
+**Reports UI gap:** the kind dropdown was hardcoded to the five original kinds,
+so the new engagement deliverable was API-only. `Reports.tsx` now lists
+`tradecraft`.
+
+Suite: **214 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+the replaced fingerprint tests), ruff clean; frontend typecheck + build green
+(290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
+`/tradecraft`, and a "generate report" button wired to the deliverable.
 
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and

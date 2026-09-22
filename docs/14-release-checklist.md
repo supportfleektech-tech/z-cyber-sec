@@ -31,7 +31,21 @@ Date (UTC): ____   Approver (human, name + role): ____
       not the dev default, in env only (never in repo) — ADR-006
 - [ ] Network: flow matrix applied on target host (infra/network/validate_flows.sh → PASS)
 - [ ] TLS (prod): Caddy ACME certificate active for <domain>; HSTS header present
-- [ ] Login rate limit verified at the edge (Caddyfile: 50r/10s per IP)
+- [ ] Caddyfile loads on the stock image (SEC-073): the file must use stock directives
+      only — `docker compose --profile prod run --rm caddy caddy validate
+      --config /etc/caddy/Caddyfile`. (`rate_limit` is NOT a stock directive.)
+- [ ] Login rate limiting verified IN-APP (SEC-073): 50 attempts / 10 s per IP by
+      default in STAGING/PROD → the 51st returns `429` + `Retry-After`
+      (it is not an edge control; do not look for it in the Caddyfile)
+- [ ] `/metrics` not publicly reachable (SEC-073): `curl -s -o /dev/null -w '%{http_code}'
+      https://<domain>/metrics` → `403`, while the internal bind serves it
+      (`curl -s http://127.0.0.1:8080/metrics`, plus the bearer token if `METRICS_TOKEN` is set)
+- [ ] Unknown API path returns JSON, not the SPA (SEC-073):
+      `curl -s -o /dev/null -w '%{http_code}' https://<domain>/api/nope` → `404`
+- [ ] Detection rules all compile (SEC-074): `python -m scripts.lint_rules` → exit 0
+- [ ] Tradecraft guardrails intact (SEC-075/076): `GET /api/tradecraft/scope` lists only
+      targets of authorized/running exercises; an out-of-scope review is refused with
+      `400` AND appears as `tradecraft.out_of_scope` in the audit log
 
 ## Rollout plan
 - [ ] Backup of current production data taken and verified (sha256 recorded)

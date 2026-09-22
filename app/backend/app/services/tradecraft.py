@@ -144,18 +144,31 @@ REVIEW_QUESTIONS = [
 ]
 
 
+_SEVERITY_WORDS = {"critical", "high", "medium", "low", "info", "severe", "important", "minor",
+                   "severity", "sev"}
+
+
 def _fingerprint(target: str | None, vuln: dict | None, title: str | None) -> str:
     """Stable dedupe key: same target + same weakness class + same shape.
 
     Bug bounty triage dies on duplicates; identical submissions cluster instead
-    of being re-reviewed. Deliberately coarser than the title: URL/port noise
-    and severity wording must not produce a different key.
+    of being re-reviewed. So the key must be invariant under presentation
+    noise — otherwise the same finding submitted twice lands in two clusters
+    and the feature silently does nothing:
+
+    - the target is normalised the same way scope matching is (scheme, port,
+      path and trailing dots dropped), so ``https://lab-web-01:8443/x`` and
+      ``lab-web-01`` agree;
+    - severity vocabulary is dropped from the title words, because
+      "SQL Injection (critical)" and "sql injection" are one finding;
+    - everything else about the title is sorted, so word order does not matter.
     """
-    asset = (target or (vuln or {}).get("asset_id") or "").lower()
+    asset = _normalize_target(target or "") or str((vuln or {}).get("asset_id") or "")
     cve = ((vuln or {}).get("cve_id") or "").lower()
-    words = re.sub(r"[^a-z0-9 ]", " ", (title or (vuln or {}).get("title") or "").lower())
-    words = " ".join(sorted(w for w in words.split() if len(w) > 3))
-    return hashlib.sha256(f"{asset}|{cve}|{words}".encode()).hexdigest()[:16]
+    raw = title or (vuln or {}).get("title") or ""
+    words = re.sub(r"[^a-z0-9 ]", " ", raw.lower()).split()
+    signature = " ".join(sorted(w for w in words if len(w) > 3 and w not in _SEVERITY_WORDS))
+    return hashlib.sha256(f"{asset}|{cve}|{signature}".encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------- scope guard
