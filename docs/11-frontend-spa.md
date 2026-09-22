@@ -59,5 +59,11 @@ The backend serves `dist/` automatically when it exists
 
 The frontend is typechecked + built in CI (`npm run build` runs
 `tsc -b`). Behavioral coverage of the APIs it calls comes from the
-backend suite (97 tests, `app/backend/tests/`); manual E2E flows are
+backend suite (145 tests, `app/backend/tests/`); manual E2E flows are
 recorded in docs/13.
+
+Status badges reuse the `.st` classes in `theme.css`. SEC-074 added
+`.st.inert` (red) for a detection rule that is stored as `active` but cannot
+compile — it deliberately does not reuse the green `live` or amber `gap`
+styling, because "will never fire" is a different state from "has not fired
+yet".

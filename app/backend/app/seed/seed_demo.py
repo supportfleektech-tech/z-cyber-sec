@@ -17,6 +17,7 @@ import yaml
 from .. import db, security
 from ..audit import record_audit
 from ..config import settings
+from ..services.detection import rule_health
 
 SYSTEM = {"type": "system", "id": "seed", "name": "seed-demo"}
 
@@ -101,6 +102,15 @@ def _seed_rules(conn) -> int:
     n = 0
     for f in sorted(settings.rules_dir.glob("*.yaml")):
         spec = yaml.safe_load(f.read_text())
+        # SEC-074: a shipped rule that cannot compile would be stocked as
+        # "active" and then quietly ignored by detection forever. Refuse it at
+        # seed time and name the file — this is a repository bug, not operator
+        # input. `scripts/lint_rules.py` catches it earlier, in CI.
+        health = rule_health(spec or {})
+        if not health["compiles"]:
+            raise RuntimeError(
+                f"shipped rule {f.name} does not compile and would be INERT: {health['error']}"
+            )
         if db.one(conn, "SELECT id FROM detection_rules WHERE uid = ?", (spec.get("uid"),)):
             continue
         conn.execute(

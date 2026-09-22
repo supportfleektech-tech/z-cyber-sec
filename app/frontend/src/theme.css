@@ -102,6 +102,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .st.closed, .st.completed, .st.resolved, .st.fixed, .st.met, .st.suppressed, .st.approved { background: #123227; color: var(--ok); border-color: transparent; }
 .st.denied, .st.rejected, .st.failed, .st.aborted { background: #3b1120; color: var(--crit); border-color: transparent; }
 .st.quarantined { background: #2a1a3a; color: #d9a8ff; border-color: transparent; }
+/* SEC-074: a rule stored as `active` that cannot compile is INERT — detection
+   will never fire it. It must not read as a healthy status or as a mere gap. */
+.st.inert { background: #3b1120; color: var(--crit); border-color: transparent; }
+.inert-warn { border: 1px solid #3b1120; background: #2a0d17; padding: 8px 10px; border-radius: 4px; margin-bottom: 10px; }
+.inert-warn code { color: var(--crit); }
 
 button, .btn {
   background: #1a2b45; color: var(--text); border: 1px solid var(--border); border-radius: 6px;

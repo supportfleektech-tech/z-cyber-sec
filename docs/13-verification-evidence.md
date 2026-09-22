@@ -248,6 +248,61 @@ Caddyfile therefore uses only stock directives (`encode`, `header`, `respond`,
 `reverse_proxy`, `@matcher`) — correct by inspection, to be confirmed by
 `caddy validate` on the target host before go-live.
 
+## SEC-074 inert-rule blind spot — Verified, 2026-09-22
+
+Closes the gap this file itself recorded ("the engine is a documented subset;
+no linter for out-of-subset rules yet").
+
+**Defect as found:** `app/routers/soc.py` skipped a non-compiling rule with a
+bare `except RuleError: continue` — no log, no audit, no counter — while
+`GET /rules` still listed it as `active` and `/rules/coverage` showed it as a
+"gap" (indistinguishable from "no matching traffic yet"). `_seed_rules` also
+inserted `rules/*.yaml` into the database **without compiling them**. Net
+effect: a rule ported from a full Sigma pack, or invalidated by a grammar
+change, became a permanent silent blind spot — the operator would believe they
+had coverage that could never fire.
+
+Reproduced before fixing: a rule using the common `action|contains|all` +
+`condition: 1 of selection*` raised `RuleError: Cannot parse condition at: '*'`
+and was dropped silently (verified directly against `compile_rule`).
+
+**Fix (four layers):**
+
+| Layer | Change |
+|---|---|
+| Engine | `detection.rule_health(spec)` returns `{compiles, error, rule}` instead of raising — one implementation for every surface |
+| Runtime | the skip is logged (`WARNING cybersec.detection: detection rule <uid> cannot compile and is INERT: <reason>`), throttled to once per rule per process |
+| API | `GET /rules` adds `compiles`/`error` per rule + `summary{ok,broken,broken_uids}`; `GET /rules/coverage` adds `inert_rules` + `broken_rules`, keeps inert rules **out** of `gaps`, and counts only runnable rules in `coverage_pct` |
+| Seed + CI | `_seed_rules` compiles every shipped rule and raises `RuntimeError` naming the file; `scripts/lint_rules.py` validates `rules/*.yaml` (or a named ported file) with porting advice, run in the CI backend job |
+
+**Verified live** (preview server, rule inserted directly into SQLite to
+simulate one that became invalid after an engine change — the case no
+write-time check can catch):
+
+- `GET /api/soc/rules` → `summary: {"ok": 6, "broken": 1, "broken_uids":
+  ["legacy-inert-1"]}`; the inert rule reports `compiles: false`,
+  `error: Cannot parse condition at: '*'`, `status: active`.
+- `GET /api/soc/rules/coverage` → `inert_rules: 1`, `broken_rules:
+  [("legacy-inert-1", …)]`, `gaps: []`, `coverage_pct: 100.0` (of the 6
+  runnable rules) — previously this read 6/7 with the rule listed as a gap.
+- Two ingest batches → the INERT warning appeared **exactly once** in the
+  server log (throttle confirmed).
+- `python -m scripts.lint_rules` on the 6 shipped rules → exit 0, all compile.
+  On a verbatim SigmaHQ rule → exit 1 with `title`/`id`/`level` mapping advice
+  and the field-modifier explanation.
+- Frontend: SOC page renders a `live`/`inert` marker per rule plus a banner
+  listing inert rules and reasons (build verified; `inert-warn`/`st.inert`
+  present in the shipped bundle).
+
+The grammar claims in `docs/15-detection-rules.md` were established by probing
+the compiler, not by reading it: `a`, `a and b`, `a or b`, `not a`,
+`(a or b) and c`, `all`, `any`, `2 of` compile; `1 of a`, `2 of (a, b)`,
+`all of (a,b)`, `1 of a*`, `all of them` do **not**. `N of` counts terms
+matched by a single event.
+
+Suite: **145 passed** (129 + 16 new in `tests/test_rule_health.py`), ruff clean
+on `app/ scripts/ tests/`.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
   live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency
@@ -263,8 +318,12 @@ Caddyfile therefore uses only stock directives (`encode`, `header`, `respond`,
   `validate_flows.sh` encode the docs/03 flow matrix; they are for the target
   host and **unapplied** here (no authorized target host in this sandbox) —
   treat enforcement as **Proposed/Blocked on a real host**.
-- **Real-Sigma-pack porting**: the engine is a documented subset; no
-  linter for out-of-subset rules yet (backlog P2).
+- **Real-Sigma-pack porting**: the engine is a documented subset and porting
+  is deliberately manual (docs/15); `scripts/lint_rules.py` + the seed guard +
+  `/rules` health reporting now catch out-of-subset rules (SEC-074), so an
+  inert rule can no longer hide. What remains unbuilt: an **automatic
+  translator** from full Sigma to this subset (judged not worth building — a
+  silently mistranslated regex/`|all` is worse than a hand rewrite).
 - **Agent LLM adapters (SEC-050)**: now wired (builtin/openai_compat/cli) and
   tested with a stubbed LLM + real subprocess; a live local model end-to-end
   (e.g. Ollama) is not exercised in this sandbox — **Proposed**.

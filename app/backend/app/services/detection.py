@@ -33,6 +33,23 @@ class RuleError(ValueError):
     pass
 
 
+def rule_health(spec: dict) -> dict:
+    """Compile ``spec`` and report the outcome instead of raising.
+
+    A rule that cannot compile is *silently* inert at detection time, so every
+    surface that lists rules (``GET /rules``, ``/rules/coverage``) must be able
+    to say "this rule can never fire" and why. Returning a status dict keeps
+    that check in one place (SEC-074).
+    """
+    try:
+        rule = compile_rule(spec)
+    except RuleError as e:
+        return {"compiles": False, "error": str(e)}
+    except Exception as e:  # defensive: malformed spec that isn't a RuleError
+        return {"compiles": False, "error": f"{type(e).__name__}: {e}"}
+    return {"compiles": True, "error": None, "rule": rule}
+
+
 # --------------------------------------------------------------- condition parser
 
 _TOKEN_RE = re.compile(r"\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|of|all|any|not|and|or|\(|\))")

@@ -91,13 +91,15 @@ infra/                   # README + local compose, target-host network matrix, p
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q     # 97 tests
-cd app/backend && .venv/bin/ruff check app/         # lint
-cd app/frontend && npm run build                    # tsc -b && vite build
+cd app/backend && .venv/bin/python -m pytest -q          # 145 tests
+cd app/backend && .venv/bin/ruff check app/ scripts/ tests/
+cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
+cd app/frontend && npm run build                         # tsc -b && vite build
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`): backend job (ruff + pytest)
-and frontend job (typecheck + build) on every push/PR.
+GitHub Actions (`.github/workflows/ci.yml`) runs four jobs on every push/PR:
+secrets (gitleaks), backend (ruff + rule lint + pytest), frontend
+(typecheck + build), supply-chain (SBOM + pip-audit + npm audit).
 
 ## Documentation index
 
@@ -118,6 +120,7 @@ and frontend job (typecheck + build) on every push/PR.
 | [12](docs/12-api-reference.md) | API reference (all endpoints, error model, audit) |
 | [13](docs/13-verification-evidence.md) | Verification & evidence log |
 | [14](docs/14-release-checklist.md) | Release checklist & human approval gate (SEC-064) |
+| [15](docs/15-detection-rules.md) | Detection rule subset, validation & Sigma porting guide (SEC-074) |
 | [ADR 001–008](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production, capacity/extraction |
 
 Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·

@@ -2,7 +2,7 @@
 
 Priority: P0 = prerequisite/blocker; P1 = core; P2 = expansion; P3 = later optimization.
 
-Status as of 2026-09-22 (branch `arena/01a0c152-z-cyber-sec`): **45/45 closed** — see docs/13 for verification evidence.
+Status as of 2026-09-22 (branch `arena/01a0c152-z-cyber-sec`): **46/46 closed** — see docs/13 for verification evidence.
 
 ## P0 — Discover and protect
 - [x] SEC-001 Inventory host, OS, resources, storage, ports, Docker networks/volumes. (docs/01)
@@ -54,7 +54,7 @@ Status as of 2026-09-22 (branch `arena/01a0c152-z-cyber-sec`): **45/45 closed** 
 
 ## P2 — Production readiness
 - [x] SEC-060 Provision separate staging. (`infra/staging/` compose + env: separate volume/network/secret, HTTP-only on staging LAN, same image as prod, synthetic-labeled; actual host provisioning = ops task)
-- [x] SEC-061 Production secrets, TLS, ingress, access controls. (Boot guard; Caddy ACME TLS + rate limit + security headers; `ForwardedHeadersMiddleware` → Secure cookie + real client IP behind the edge; env templates. Actual deployment = ops task on the target host)
+- [x] SEC-061 Production secrets, TLS, ingress, access controls. (Boot guard; Caddy ACME TLS + security headers; `ForwardedHeadersMiddleware` → Secure cookie + real client IP behind the edge; env templates. Edge rate limiting was replaced by the in-app limiter in SEC-073 — the stock `caddy:2` image cannot load `rate_limit`, so it would have been a control that existed nowhere. Actual deployment = ops task on the target host)
 - [x] SEC-062 SBOM, dependency/image scanning, release provenance. (CI `supply-chain` job: CycloneDX SBOM from pinned requirements + pip-audit + npm audit; gitleaks secret scan; image scan/signed releases = Proposed for the registry stage)
 - [x] SEC-063 RTO/RPO, backup isolation, restore/rollback rehearsal. (`scripts/backup_rehearsal.py`: in-process drill PASS (342/342, RTO 0.01s) AND live drill PASS (real uvicorn stop/start: 423/423 events, chain intact, RTO 16.68s; lost files preserved in data.lost-*)
 - [x] SEC-064 Production acceptance and human release approval. (Release gate built: `POST/GET /api/admin/releases` + `/latest` gate view (admin-only, audit-chained, append-only) + Admin UI + `docs/14` checklist. The human approval act itself is recorded at deploy time by an admin — the platform enforces the gate, it does not simulate the human)
@@ -63,4 +63,5 @@ Status as of 2026-09-22 (branch `arena/01a0c152-z-cyber-sec`): **45/45 closed** 
 - [x] SEC-070 Capacity-based service extraction if justified. (ADR-008 decision: do NOT extract — measured 3.9k/6.7k ev/s single-process vs. expected volume; quantified revisit triggers; extraction seams already in place (db.py, `_run_detections`, scheduler `tick()`, stateless report builder))
 - [x] SEC-071 Advanced dashboards, saved searches, scheduled reports. (Coverage + purple-team + saved-search panels on /soc; report schedules CRUD + in-process scheduler daemon; retention report on /admin)
 - [x] SEC-072 Cost/resource optimization and retention tuning. (Retention labels + `GET /api/admin/retention/report` report-only per ADR-005; resource limits in compose. Service-extraction cost model = SEC-070, Proposed)
+- [x] SEC-074 Inert-rule blind spot: rule validation across the whole lifecycle. (Was: `except RuleError: continue` skipped a non-compiling rule silently while `/rules` showed it `active`; `rules/*.yaml` were seeded uncompiled. Now: `detection.rule_health`; loud throttled warning; `/rules` → `compiles`/`error` + `broken` summary; `/coverage` → `inert_rules`/`broken_rules` separate from gaps; seed refuses a broken shipped rule; `scripts/lint_rules.py` in CI with porting advice; SOC page `live`/`inert` markers + banner. docs/15 = subset + porting guide (grammar verified by probing). 16 new tests)
 - [x] SEC-073 API surface hardening from a post-build audit. (4 findings fixed + tested: unknown `/api/*` → JSON 404 not SPA HTML; `/metrics` denied on the public edge + optional `METRICS_TOKEN`; login brute-force limiting moved into the app (`app/ratelimit.py`, 50/10s per IP, on in STAGING/PROD, audited) because the stock `caddy:2` image cannot load `rate_limit`; `infra/prod/.env.example.prod` added + `.gitignore` negation so env templates are committable. Route audit: 111 `/api` routes, 0 unauthenticated. Suite 115 → 129. See docs/13)

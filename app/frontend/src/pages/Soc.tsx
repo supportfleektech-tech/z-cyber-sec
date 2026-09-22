@@ -31,6 +31,9 @@ interface Rule {
   name: string;
   severity: string;
   status: string;
+  // SEC-074: false = stored but INERT (detection never fires it).
+  compiles: boolean;
+  error: string | null;
 }
 interface Paged<T> {
   items: T[];
@@ -39,10 +42,12 @@ interface Paged<T> {
 interface Coverage {
   total_rules: number;
   active_rules: number;
+  inert_rules: number;
   fired_rules: number;
   coverage_pct: number;
   gaps: { uid: string; name: string; severity: string }[];
-  rules: { uid: string; name: string; severity: string; status: string; alerts_total: number; last_alert_at: string | null; never_fired: boolean }[];
+  broken_rules: { uid: string; name: string; severity: string; status: string; error: string | null }[];
+  rules: { uid: string; name: string; severity: string; status: string; alerts_total: number; last_alert_at: string | null; never_fired: boolean; compiles: boolean; error: string | null }[];
 }
 interface Scenario {
   uid: string;
@@ -159,6 +164,11 @@ export default function Soc() {
                     <td>{r.name}</td>
                     <td><SevBadge value={r.severity} /></td>
                     <td><StBadge value={r.status} /></td>
+                    <td>
+                      {r.compiles
+                        ? <span className="st closed">live</span>
+                        : <span className="st inert" title={r.error || undefined}>inert</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -358,6 +368,20 @@ function CoveragePanel() {
               <div className="stat"><div className="k">coverage</div><div className="v">{cov.data.coverage_pct}%</div><div className="s">active rules have fired</div></div>
               <div className="stat"><div className="k">fired / active</div><div className="v">{cov.data.fired_rules}/{cov.data.active_rules}</div><div className="s">of {cov.data.total_rules} total</div></div>
             </div>
+            {cov.data.inert_rules > 0 && (
+              <div className="inert-warn">
+                <strong>{cov.data.inert_rules} inert rule(s)</strong> — these are stored
+                as <code>active</code> but cannot compile, so detection never fires them
+                (<code>scripts/lint_rules.py</code>):
+                <ul style={{ margin: "6px 0 0 16px" }}>
+                  {cov.data.broken_rules.map((b) => (
+                    <li key={b.uid}>
+                      <span className="mono">{b.uid}</span> — {b.error}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {cov.data.gaps.length > 0 ? (
               <div className="faint mb">Coverage gaps (active, never fired): {cov.data.gaps.map((g) => g.uid).join(", ")}</div>
             ) : (
@@ -370,7 +394,13 @@ function CoveragePanel() {
                     <td className="mono dim">{r.uid}</td>
                     <td>{r.name}</td>
                     <td className="dim">{r.alerts_total}</td>
-                    <td>{r.never_fired ? <span className="st open">gap</span> : <span className="st closed">fired</span>}</td>
+                    <td>
+                      {!r.compiles
+                        ? <span className="st inert" title={r.error || undefined}>inert</span>
+                        : r.never_fired
+                          ? <span className="st open">gap</span>
+                          : <span className="st closed">fired</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

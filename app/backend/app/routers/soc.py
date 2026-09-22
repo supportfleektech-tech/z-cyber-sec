@@ -4,6 +4,7 @@ SEC-022 audit pipeline, SEC-030/031 telemetry+detections, SEC-032 triage.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any
 
@@ -13,7 +14,13 @@ from pydantic import BaseModel, Field, field_validator
 from .. import db
 from ..audit import record_audit
 from ..deps import require
-from ..services.detection import RuleError, compile_rule, evaluate_batch
+from ..services.detection import RuleError, compile_rule, evaluate_batch, rule_health
+
+log = logging.getLogger("cybersec.detection")
+
+# Rules already reported as non-compiling in this process (avoid log spam on
+# every ingest batch). Keyed by rule uid.
+_reported_broken: set[str] = set()
 
 router = APIRouter(prefix="/api/soc", tags=["soc"])
 
@@ -91,17 +98,27 @@ def ingest_events(batch: BatchIn, conn: sqlite3.Connection = Depends(db.get_conn
 def _run_detections(conn: sqlite3.Connection, events: list[dict],
                     threshold_context: list[dict] | None = None) -> list[dict]:
     """Evaluate active rules. `events` are the candidate events for non-threshold
-    rules; `threshold_context` is the window used for threshold rules."""
+    rules; `threshold_context` is the window used for threshold rules.
+
+    A rule that cannot compile is skipped — but never silently (SEC-074): it is
+    logged once per process, and `GET /rules` + `GET /rules/coverage` report it
+    as broken with the compiler's reason. Skipping quietly would mean an
+    operator believes they have coverage they do not have.
+    """
     if not events:
         return []
     rules = db.q(conn, "SELECT * FROM detection_rules WHERE status = 'active'")
     raised = []
     for r in rules:
         spec = db.jload(r["spec"], {})
-        try:
-            rule = compile_rule(spec)
-        except RuleError:
+        health = rule_health(spec)
+        if not health["compiles"]:
+            if r["uid"] not in _reported_broken:
+                _reported_broken.add(r["uid"])
+                log.warning("detection rule %s cannot compile and is INERT: %s",
+                            r["uid"], health["error"])
             continue
+        rule = health["rule"]
         if rule.requires_threshold:
             ctx = threshold_context if threshold_context is not None else db.q(
                 conn, "SELECT id, ts, host, user, action, outcome, severity, source_name, source_type, data FROM events "
@@ -285,8 +302,27 @@ def create_rule(body: RuleIn, conn: sqlite3.Connection = Depends(db.get_conn),
 
 @router.get("/rules")
 def list_rules(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Depends(require("soc.read"))):
-    rows = db.q(conn, "SELECT id, uid, name, description, severity, status, updated_at FROM detection_rules ORDER BY uid")
-    return {"items": rows, "total": len(rows)}
+    """Rules with compile health (SEC-074).
+
+    `compiles: false` means the rule is stored but **inert** — detection will
+    never fire it. `error` carries the compiler's reason (e.g. an unsupported
+    condition construct when porting a rule from a full Sigma pack).
+    """
+    rows = db.q(conn, "SELECT id, uid, name, description, severity, status, spec, updated_at "
+                      "FROM detection_rules ORDER BY uid")
+    items = []
+    for r in rows:
+        health = rule_health(db.jload(r["spec"], {}) or {})
+        r.pop("spec", None)
+        r["compiles"] = health["compiles"]
+        r["error"] = health["error"]
+        items.append(r)
+    broken = [i["uid"] for i in items if not i["compiles"]]
+    return {
+        "items": items,
+        "total": len(items),
+        "summary": {"ok": len(items) - len(broken), "broken": len(broken), "broken_uids": broken},
+    }
 
 
 @router.patch("/rules/{rule_id}")
@@ -355,6 +391,7 @@ def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
     rules = db.q(conn, "SELECT * FROM detection_rules ORDER BY uid")
     per_rule = []
     gaps = []
+    broken_rules = []
     for r in rules:
         alert = db.one(conn,
             "SELECT COUNT(*) AS n, MAX(last_seen) AS last_seen FROM alerts WHERE rule_id = ?",
@@ -363,23 +400,36 @@ def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
         last = alert["last_seen"] if alert else None
         active = r["status"] == "active"
         never_fired = n == 0
+        # SEC-074: distinguish "has not fired yet" from "can never fire".
+        health = rule_health(db.jload(r["spec"], {}) or {})
         per_rule.append({
             "rule_id": r["id"], "uid": r["uid"], "name": r["name"],
             "severity": r["severity"], "status": r["status"],
             "alerts_total": n, "last_alert_at": last,
             "never_fired": never_fired,
+            "compiles": health["compiles"], "error": health["error"],
         })
-        if active and never_fired:
+        if not health["compiles"]:
+            broken_rules.append({"uid": r["uid"], "name": r["name"],
+                                 "severity": r["severity"], "status": r["status"],
+                                 "error": health["error"]})
+        # A broken rule is a configuration fault, not a coverage gap: it is
+        # reported separately so the gap list stays actionable.
+        elif active and never_fired:
             gaps.append({"uid": r["uid"], "name": r["name"], "severity": r["severity"]})
-    active_rules = [p for p in per_rule if p["status"] == "active"]
+    # Coverage counts only rules that *can* run; counting inert rules as
+    # "unfired" would understate coverage for a reason nobody can act on.
+    active_rules = [p for p in per_rule if p["status"] == "active" and p["compiles"]]
     fired = [p for p in active_rules if not p["never_fired"]]
     coverage_pct = round(100.0 * len(fired) / len(active_rules), 1) if active_rules else 100.0
     return {
         "total_rules": len(rules),
         "active_rules": len(active_rules),
+        "inert_rules": len(broken_rules),
         "fired_rules": len(fired),
         "coverage_pct": coverage_pct,
         "gaps": gaps,
+        "broken_rules": broken_rules,
         "rules": per_rule,
     }
 

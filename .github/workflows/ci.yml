@@ -47,7 +47,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Lint (ruff)
-        run: ruff check app/
+        run: ruff check app/ scripts/ tests/
+      - name: Validate detection rules (SEC-074)
+        # A rule outside the engine's Sigma subset would be stored as 'active'
+        # and never fire. Fail the build instead of shipping an inert rule.
+        run: python -m scripts.lint_rules
       - name: Run test suite
         run: python -m pytest -q
         env:
