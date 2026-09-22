@@ -26,7 +26,11 @@ interface Paged<T> {
   total: number;
 }
 
-const CASE_STATUSES = ["open", "investigating", "containment", "recovered", "closed"];
+// SEC-079: must match CASE_STATUSES/TASK_STATUSES in routers/cases.py. The old list
+// offered "containment"/"recovered" (rejected with 400 by the API) and hid the real
+// "contained"/"mitigated" states, which were then unfilterable in the UI.
+const CASE_STATUSES = ["open", "investigating", "contained", "mitigated", "closed"];
+const TASK_STATUS_OPTIONS = ["open", "in_progress", "done", "canceled"];
 
 export default function Incidents() {
   const [page, setPage] = useState(1);
@@ -229,7 +233,7 @@ function CaseModal({ c, onClose, onFlash }: { c: CaseRow; onClose: () => void; o
                           }
                         }}
                       >
-                        {["open", "in_progress", "done"].map((s) => <option key={s}>{s}</option>)}
+                        {TASK_STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
                       </select>
                     </td>
                   </tr>

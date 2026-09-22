@@ -17,6 +17,20 @@ from ..deps import require
 
 router = APIRouter(prefix="/api/cloud", tags=["cloud"])
 
+# SEC-079: a posture finding's status is an audited state change, so it must be
+# validated like every other state machine in the platform — the create/update
+# handlers previously stored whatever string arrived (`status: "banana"` was
+# accepted and then counted nowhere). The vocabulary matches what the UI offers.
+POSTURE_STATUSES = {"open", "remediating", "accepted", "resolved"}
+SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+
+def _validate_posture(status: str, severity: str) -> None:
+    if status not in POSTURE_STATUSES:
+        raise HTTPException(400, {"code": "bad_status", "allowed": sorted(POSTURE_STATUSES)})
+    if severity not in SEVERITIES:
+        raise HTTPException(400, {"code": "bad_severity", "allowed": sorted(SEVERITIES)})
+
 
 def _actor(user: dict) -> dict:
     return {"type": "user", "id": str(user["user_id"]), "name": user["username"]}
@@ -69,6 +83,7 @@ class PostureIn(BaseModel):
 @router.post("/posture", status_code=201)
 def create_posture(body: PostureIn, conn: sqlite3.Connection = Depends(db.get_conn),
                    user: dict = Depends(require("cloud.write"))):
+    _validate_posture(body.status, body.severity)
     if not db.one(conn, "SELECT id FROM cloud_assets WHERE id = ?", (body.asset_id,)):
         raise HTTPException(400, {"code": "bad_asset"})
     cur = conn.execute(
@@ -101,6 +116,7 @@ def list_posture(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = D
 @router.patch("/posture/{finding_id}")
 def update_posture(finding_id: int, body: PostureIn, conn: sqlite3.Connection = Depends(db.get_conn),
                    user: dict = Depends(require("cloud.write"))):
+    _validate_posture(body.status, body.severity)
     p = db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (finding_id,))
     if not p:
         raise HTTPException(404, {"code": "not_found"})

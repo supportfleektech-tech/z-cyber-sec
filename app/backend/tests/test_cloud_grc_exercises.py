@@ -17,11 +17,23 @@ def test_cloud_assets_and_posture(client, seeded):
     r = client.post("/api/cloud/posture", json={"asset_id": 9999, "rule_id": "csp-009",
                                                 "title": "Bad asset"})
     assert r.status_code == 400
+    # SEC-079: posture status/severity are validated like every other audited
+    # state. This test previously asserted `status: "remediated"` was stored —
+    # a word no other part of the product uses (the UI offers `resolved`, the
+    # seed uses `open`), which is exactly how the vocabulary drifted.
     r = client.patch("/api/cloud/posture/1", json={"asset_id": 1, "rule_id": "csp-001",
-                                                   "title": "Updated", "severity": "low",
-                                                   "status": "remediated"})
+                                                    "title": "Updated", "severity": "low",
+                                                    "status": "remediated"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_status"
+    r = client.patch("/api/cloud/posture/1", json={"asset_id": 1, "rule_id": "csp-001",
+                                                    "title": "Updated", "severity": "low",
+                                                    "status": "resolved"})
     assert r.status_code == 200
-    assert r.json()["status"] == "remediated"
+    assert r.json()["status"] == "resolved"
+    r = client.patch("/api/cloud/posture/1", json={"asset_id": 1, "rule_id": "csp-001",
+                                                    "title": "Updated", "severity": "banana",
+                                                    "status": "open"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_severity"
 
 
 def test_grc_controls_risks_evidence(client, seeded, conn):

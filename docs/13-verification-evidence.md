@@ -537,7 +537,48 @@ approver is audited `executed:false` and the case count is unchanged.
 
 Suite 222 → **224 passed**, ruff clean.
 
-Suite: **224 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-079 — the SPA offered statuses the API rejects, and hid the real ones
+
+**Defect class found by sweeping every picker in the SPA against the API's
+accepted values** (the same class that produced the missing `tradecraft` report
+kind in SEC-076). Silently, three screens were wrong in both directions — they
+offered values the API refuses and omitted values it accepts, so the omission
+looked like a broken feature:
+
+| Screen | Offered by the UI, rejected by the API | Accepted by the API, unreachable in the UI |
+|--------|----------------------------------------|--------------------------------------------|
+| `/soc` triage | `false_positive` → live `400 bad_status` | `dismissed` — **the way a false positive is actually recorded** |
+| `/incidents` case status | `containment`, `recovered` → live `400 bad_status` | `contained`, `mitigated` (also unfilterable) |
+| `/incidents` task status | — | `canceled` |
+| `/cloud` posture | — (the API validated nothing at all) | — |
+
+The first row is the serious one: an analyst following the UI to dismiss an
+alert as a false positive got a `400`, and there was no way to record the
+outcome the platform actually supports.
+
+Fixes:
+- `Soc.tsx`, `Incidents.tsx` pickers now carry the API's exact vocabulary;
+  `Incidents.tsx` task statuses gained `canceled`.
+- `routers/cloud.py` gained the validation it never had: posture `status` and
+  `severity` are checked on create and update (`400 bad_status` /
+  `bad_severity` with the allowed list). The existing test asserted the old
+  behaviour with a third vocabulary — `status: "remediated"`, a word the UI
+  (`resolved`) and the seed (`open`) never used — which is precisely how the
+  drift survived; it now asserts `400` for the unknown value and `200` for
+  `resolved`.
+- **`tests/test_enum_parity.py` (new, 10 tests)** reads the SPA source and
+  compares every named picker list with the set the API accepts — alerts,
+  cases, case tasks, GRC controls, GRC risks, cloud posture, vulns, report
+  kinds, roles — plus the inline severity lists. Drift now fails in CI with the
+  two-way diff in the message. Verified non-vacuous: reintroducing
+  `false_positive` fails with *"offered by the UI but rejected by the API:
+  ['false_positive'] / accepted by the API but unreachable in the UI:
+  ['dismissed']"*, and the suite passes again once restored.
+
+Suite 224 → **234 passed**, ruff clean, frontend typecheck + build green
+(290.67 kB / 81.08 kB gzip).
+
+Suite: **234 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.

@@ -67,3 +67,7 @@ Status badges reuse the `.st` classes in `theme.css`. SEC-074 added
 compile — it deliberately does not reuse the green `live` or amber `gap`
 styling, because "will never fire" is a different state from "has not fired
 yet".
+
+## Vocabulary parity (SEC-079)
+
+Every picker that sends a status, kind, severity or role value must offer exactly what the API accepts. `tests/test_enum_parity.py` reads the page sources and compares each named list with the API's allowed set, failing CI with a two-way diff — a UI that offers a value the API rejects (and hides one it accepts) is a defect that presents as a backend error to the person using it.

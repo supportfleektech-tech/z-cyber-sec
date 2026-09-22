@@ -64,7 +64,10 @@ interface SavedSearch {
   created_at: string;
 }
 
-const TRIAGE_STATUSES = ["new", "triaging", "confirmed", "false_positive", "closed"];
+// SEC-079: must match ALERT_STATUSES in routers/soc.py — "false_positive" is not
+// a status the API accepts (400 bad_status), and the real "dismissed" value was
+// missing, so a false positive could not be recorded from the UI at all.
+const TRIAGE_STATUSES = ["new", "triaging", "confirmed", "dismissed", "closed"];
 
 export default function Soc() {
   const [status, setStatus] = useState("");
