@@ -116,7 +116,7 @@ never initiates network action — threat model).
 | Method & path | Purpose |
 |---|---|
 | `GET /approvals?status=` | Approval queue (`{id, task_id, action, status, requested_by, task_title, agent_name}`) |
-| `POST /approvals/{id}/decide` | `{decision: approve|reject, comment?}` — the human gate |
+| `POST /approvals/{id}/decide` | `{decision: approve|reject, comment?}` — the human gate. Single-decision by construction (SEC-078): the status transition is a guarded UPDATE, so concurrent approvals yield exactly one `200` and the rest `409 already_decided`; a second approval for an already-claimed task is approved but recorded `executed:false` |
 | `GET/POST /tasks` · `GET /tasks/{id}` | Task queue; detail includes `result`, original `request`, `tool_calls[]` (tool, allowed, reason, result), `approvals[]` |
 | `GET /tools` | Tool registry: `{name: {description, read_only, requires_approval}}` |
 | `GET/POST /` · `PATCH /{agent_id}` | Agent registry + per-agent tool allowlists. Create/patch accept `adapter` (`builtin`\|`openai_compat`\|`cli`) + `adapter_config` (SEC-050) |

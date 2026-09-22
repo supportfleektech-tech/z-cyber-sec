@@ -255,8 +255,20 @@ def decide_approval(approval_id: int, body: ApprovalDecision,
         raise HTTPException(400, {"code": "bad_decision"})
     now = db.utcnow()
     status = "approved" if body.decision == "approve" else "rejected"
-    conn.execute("UPDATE approvals SET status = ?, decided_by = ?, decision = ?, comment = ?, decided_at = ? "
-                 "WHERE id = ?", (status, user["username"], body.decision, body.comment, now, approval_id))
+    # SEC-078: compare-and-set, not read-then-write. The `status != 'pending'`
+    # check above is a read; if two approval requests interleave between that
+    # read and this write, both pass it and both go on to execute the tool, and
+    # the last writer silently becomes the recorded approver. Guarding the
+    # statement makes the transition atomic: exactly one caller can move the
+    # approval out of `pending`.
+    cur = conn.execute(
+        "UPDATE approvals SET status = ?, decided_by = ?, decision = ?, comment = ?, decided_at = ? "
+        "WHERE id = ? AND status = 'pending'",
+        (status, user["username"], body.decision, body.comment, now, approval_id))
+    if cur.rowcount != 1:
+        conn.rollback()
+        raise HTTPException(409, {"code": "already_decided",
+                                  "message": "Another decision for this approval was committed first."})
     task = db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (ap["task_id"],))
     agent = db.one(conn, "SELECT * FROM agents WHERE id = ?", (task["agent_id"],))
     if body.decision == "reject":
@@ -271,16 +283,27 @@ def decide_approval(approval_id: int, body: ApprovalDecision,
                          (task["id"],))
         if int(pending["c"]) == 0:
             task_row = db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (task["id"],))
-            conn.execute("UPDATE agent_tasks SET status = 'running', started_at = COALESCE(started_at, ?) "
-                         "WHERE id = ?", (now, task["id"]))
-            conn.commit()
-            result = policy.execute_task(conn, task_row, agent)
-            conn.execute("UPDATE agent_tasks SET status = ?, result = ?, finished_at = ? WHERE id = ?",
-                         ("completed" if not result.get("errors") else "failed",
-                          db.jdump(result), db.utcnow(), task["id"]))
-            record_audit(conn, _actor(user), "approval.executed", target_type="approval",
-                         target_id=str(approval_id),
-                         detail={"task_id": task["id"], "errors": result.get("errors", [])[:5]})
+            # SEC-078: claim the task atomically. Two approvals on one task can
+            # both observe "no pending approvals left" and both execute the
+            # consequential tool — the tool must run once, for one approver.
+            claim = conn.execute(
+                "UPDATE agent_tasks SET status = 'running', started_at = COALESCE(started_at, ?) "
+                "WHERE id = ? AND status = 'awaiting_approval'", (now, task["id"]))
+            if claim.rowcount == 1:
+                conn.commit()
+                result = policy.execute_task(conn, task_row, agent)
+                conn.execute("UPDATE agent_tasks SET status = ?, result = ?, finished_at = ? WHERE id = ?",
+                             ("completed" if not result.get("errors") else "failed",
+                              db.jdump(result), db.utcnow(), task["id"]))
+                record_audit(conn, _actor(user), "approval.executed", target_type="approval",
+                             target_id=str(approval_id),
+                             detail={"task_id": task["id"], "errors": result.get("errors", [])[:5]})
+            else:
+                # Another approver already claimed this task and is running it.
+                record_audit(conn, _actor(user), "approval.approved", target_type="approval",
+                             target_id=str(approval_id),
+                             detail={"task_id": task["id"], "executed": False,
+                                     "note": "task already claimed by another approval"})
         else:
             record_audit(conn, _actor(user), "approval.approved", target_type="approval",
                          target_id=str(approval_id), detail={"task_id": task["id"]})

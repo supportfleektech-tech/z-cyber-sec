@@ -484,7 +484,60 @@ negative to the person who just wrote it.
 Suite 214 → **222 passed**, ruff clean, `lint_rules` 6/6 compile, frontend
 typecheck + build green (290.66 kB / 81.07 kB gzip).
 
-Suite: **222 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-078 — the approval gate could execute one task twice
+
+**Defect found by auditing the approval guard rather than assuming it.** The
+decision handler read the approval, checked `status != 'pending'` in Python, and
+then wrote `UPDATE approvals SET status = ... WHERE id = ?` — a read followed by
+an unguarded write. Under the interleaving two concurrent approves produce, both
+requests pass the check and both proceed:
+
+```
+request A reads status: pending
+request B reads status: pending
+B's UPDATE ... WHERE id=1 affected rows: 1  -> B believes it decided the approval
+pending left: 0                             -> both requests conclude "execute the tool"
+decided_by ends as: B                       -> A's decision is silently overwritten
+```
+
+The consequence is a governance failure, not a cosmetic one: the
+consequential tool runs **twice** (one approved action executed twice), and the
+recorded approver becomes whichever request wrote last.
+
+Fixed with guarded transitions (`app/routers/agents.py`):
+
+- The decision is a compare-and-set: `UPDATE ... WHERE id = ? AND status =
+  'pending'`; `rowcount != 1` ⇒ `409 already_decided`. Exactly one caller can
+  move an approval out of `pending`.
+- The task is claimed atomically: `UPDATE agent_tasks SET status='running' ...
+  WHERE id = ? AND status = 'awaiting_approval'`. Only the claimer executes. A
+  second approval on a claimed task is approved but audited
+  `{"executed": false, "note": "task already claimed by another approval"}` —
+  visible, rather than a silent second run.
+
+Verified live (preview :8080, six simultaneous approves of one approval):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | 6 concurrent `POST /approvals/3/decide` | `req4:200`, other five `409 already_decided` |
+| 2 | Cases created for that task | **1** (count 1 → 2 overall, one title match) |
+| 3 | `approval.executed` audit rows for the approval | exactly **1** (`{"errors":[],"task_id":5}`) |
+| 4 | Task status | `completed` |
+| 5 | A second approval (id 4) for the same, already-claimed task | `200 approved`, audited `executed:false`, cases stayed at 2 |
+
+Note the two-layer behaviour visible in the live run: four of the losers were
+stopped by the cheap pre-check, one reached the compare-and-set and was stopped
+there — the guard no longer depends on timing luck.
+
+Tests: `test_stale_read_cannot_double_decide` drives the exact stale-read
+interleaving (approval committed behind the caller's back, stale snapshot
+returned) and asserts `409` plus *no* side effect; 
+`test_second_approval_on_claimed_task_does_not_reexecute` asserts the second
+approver is audited `executed:false` and the case count is unchanged.
+
+Suite 222 → **224 passed**, ruff clean.
+
+Suite: **224 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.

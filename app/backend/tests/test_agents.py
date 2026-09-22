@@ -142,6 +142,74 @@ def test_approval_rejection(client, seeded):
     assert r.status_code == 409
 
 
+def _consequential_task(client, title):
+    """A task whose tool has an observable side effect (create_case)."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    agent = next(a for a in client.get("/api/agents").json()["items"] if a["name"] == "openclaw-ops")
+    r = client.post("/api/agents/tasks", json={
+        "agent_id": agent["id"], "title": title,
+        "request": {"tool": "create_case", "args": {"title": title, "severity": "high"}}})
+    task = r.json()
+    ap = client.get("/api/agents/approvals", params={"status": "pending"}).json()["items"]
+    ap = next(a for a in ap if a["task_id"] == task["id"])
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "iris", "password": "IrisLeadPass1!"})
+    return task, ap
+
+
+def test_stale_read_cannot_double_decide(client, seeded, conn, monkeypatch):
+    """SEC-078: two concurrent approves both read status='pending'; one commits,
+    the loser still holds the stale read. The guarded UPDATE must reject the
+    loser instead of letting it execute the tool a second time."""
+    from app.routers import agents as agents_router
+
+    task, ap = _consequential_task(client, "Race loser case")
+    real_one = agents_router.db.one
+    stale = {"status": "pending", "task_id": ap["task_id"]}
+
+    def stale_read(conn_, sql, params=()):
+        if "FROM approvals WHERE id" in sql:
+            return dict(stale)          # the snapshot the loser is holding
+        return real_one(conn_, sql, params)
+
+    monkeypatch.setattr(agents_router.db, "one", stale_read)
+    # the winner's decision lands first
+    conn.execute("UPDATE approvals SET status='approved', decided_by='iris', decision='approve',"
+                 " decided_at=? WHERE id=?", (db.utcnow(), ap["id"]))
+    conn.commit()
+    r = client.post(f"/api/agents/approvals/{ap['id']}/decide",
+                    json={"decision": "approve", "comment": "stale view"})
+    monkeypatch.undo()
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "already_decided"
+    # the loser must not have executed anything
+    assert db.one(conn, "SELECT id FROM cases WHERE title='Race loser case'") is None
+    assert db.one(conn, "SELECT status FROM agent_tasks WHERE id=?", (task["id"],))["status"] == "awaiting_approval"
+
+
+def test_second_approval_on_claimed_task_does_not_reexecute(client, seeded, conn):
+    """SEC-078: two approvals on one task can both see 'nothing pending left'.
+    The task claim is atomic, so the tool runs once, for one approver."""
+    task, ap = _consequential_task(client, "Claimed once case")
+    r = client.post(f"/api/agents/approvals/{ap['id']}/decide",
+                    json={"decision": "approve", "comment": "first"})
+    assert r.status_code == 200
+    assert db.one(conn, "SELECT id FROM cases WHERE title='Claimed once case'") is not None
+    before = db.one(conn, "SELECT COUNT(*) c FROM cases")["c"]
+
+    # a second approver decides a second approval for the SAME task
+    conn.execute("INSERT INTO approvals (task_id, action, status, requested_by, created_at)"
+                 " VALUES (?, 'create_case', 'pending', 'admin', ?)", (task["id"], db.utcnow()))
+    conn.commit()
+    second = db.one(conn, "SELECT id FROM approvals WHERE task_id=? AND status='pending'", (task["id"],))["id"]
+    r = client.post(f"/api/agents/approvals/{second}/decide",
+                    json={"decision": "approve", "comment": "second"})
+    assert r.status_code == 200
+    assert db.one(conn, "SELECT COUNT(*) c FROM cases")["c"] == before     # not created twice
+    approved = db.one(conn, "SELECT detail FROM audit_events WHERE action='approval.approved'"
+                            " AND target_id=? ORDER BY id DESC LIMIT 1", (str(second),))
+    assert approved is not None and db.jload(approved["detail"])["executed"] is False
+
+
 def test_evals_suite_passes(client, seeded):
     client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
     agent = next(a for a in client.get("/api/agents").json()["items"] if a["name"] == "opencode-repo")
