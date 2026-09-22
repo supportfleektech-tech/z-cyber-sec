@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from .. import db, security
+from .. import db, ratelimit, security
 from ..audit import record_audit
+from ..config import settings
 from ..deps import get_current_user, require
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -21,6 +23,31 @@ class LoginIn(BaseModel):
 @router.post("/login")
 def login(body: LoginIn, request: Request, response: Response,
           conn: sqlite3.Connection = Depends(db.get_conn)):
+    # SEC-073: brute-force hygiene in the app (the stock Caddy image cannot
+    # run the `rate_limit` directive — see app/ratelimit.py). The client IP is
+    # the real one behind the edge: ForwardedHeadersMiddleware rewrites
+    # scope["client"] from the trusted proxy hop.
+    client_ip = request.client.host if request.client else "unknown"
+    if settings.login_rate_limit_enabled and settings.login_rate_limit > 0:
+        now = time.monotonic()
+        key = f"login:{client_ip}"
+        allowed, retry_after = ratelimit.check(
+            key, limit=settings.login_rate_limit,
+            window_s=settings.login_rate_limit_window_s, now=now)
+        if not allowed:
+            wait = int(retry_after) + 1
+            if ratelimit.should_log(key, window_s=settings.login_rate_limit_window_s, now=now):
+                record_audit(conn, {"type": "user", "id": None, "name": body.username},
+                             "auth.rate_limited", target_type="ip", target_id=client_ip,
+                             detail={"retry_after_s": wait,
+                                     "limit": settings.login_rate_limit,
+                                     "window_s": settings.login_rate_limit_window_s})
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "rate_limited",
+                        "message": f"Too many login attempts; retry in {wait}s."},
+                headers={"Retry-After": str(wait)},
+            )
     user = db.one(conn, "SELECT *, id AS user_id FROM users WHERE username = ?", (body.username,))
     if not user or not user["active"] or not security.verify_password(body.password, user["password_hash"]):
         record_audit(conn, {"type": "user", "id": None, "name": body.username},

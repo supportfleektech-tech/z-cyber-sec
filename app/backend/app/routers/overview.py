@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import platform
+import secrets
 import sqlite3
 import time
 from datetime import UTC
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from .. import db
@@ -93,10 +94,26 @@ def services(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Depen
 
 
 @router.get("/metrics")
-def metrics(conn: sqlite3.Connection = Depends(db.get_conn)):
-    """Prometheus text format (free standard). Read-only, no sensitive values.
-    Binds like the app: locally only (see network design); no auth needed for
-    local-first monitoring, documented in flow matrix."""
+def metrics(request: Request, conn: sqlite3.Connection = Depends(db.get_conn)):
+    """Prometheus text format (free standard). Read-only; counts only — no
+    secrets, no user data, no event contents.
+
+    Exposure (SEC-073): the app binds to an internal address and the prod
+    edge denies ``/metrics`` publicly (``infra/prod/Caddyfile``), so the
+    endpoint is reachable from the host / scrape network only. Set
+    ``METRICS_TOKEN`` to additionally require ``Authorization: Bearer <token>``
+    (mandatory if the port is ever published beyond the internal bind).
+    """
+    expected = settings.metrics_token
+    if expected:
+        supplied = request.headers.get("authorization", "")
+        if not secrets.compare_digest(supplied, f"Bearer {expected}"):
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "unauthenticated", "message": "Metrics token required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     def c(sql, params=()):
         r = db.one(conn, sql, params)
         return int(r["c"]) if r else 0

@@ -78,6 +78,24 @@ def create_app() -> FastAPI:
     for r in API_ROUTERS:
         app.include_router(r)
 
+    # Unknown /api/* paths must fail loudly as JSON — docs/12 promises
+    # `404 {detail:{code:"not_found"}}`, and without this the SPA shell
+    # below would answer 200 text/html for a typo'd API path, so a client
+    # would try to parse HTML as JSON instead of seeing a real 404.
+    # Registered after the real routers, which therefore always win.
+    _ALL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+
+    def _api_not_found(rest: str = ""):
+        path = f"/api/{rest}".rstrip("/") or "/api"
+        return JSONResponse(
+            status_code=404,
+            content={"detail": {"code": "not_found", "message": f"No API route: {path}"}},
+        )
+
+    app.add_api_route("/api", _api_not_found, methods=_ALL_METHODS, include_in_schema=False)
+    app.add_api_route("/api/{rest:path}", _api_not_found, methods=_ALL_METHODS,
+                      include_in_schema=False)
+
     # Health (no auth — designed for local probes; see flow matrix).
     dist: Path | None = settings.frontend_dist
     if dist and dist.exists() and (dist / "index.html").exists():

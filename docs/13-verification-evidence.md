@@ -202,6 +202,52 @@ keyword-only API), and `pgrep -f uvicorn` matching the drill's own argv
 (self-kill) → replaced with a /proc cmdline scan that excludes the drill
 process + its ancestor chain.
 
+## SEC-073 API surface hardening — Verified, 2026-09-22
+
+Post-build audit of the running app (not the test suite): every `/api` route
+was inspected for an auth dependency, and the live server was probed
+unauthenticated. Four findings, all fixed, each pinned by a test in
+`tests/test_api_surface_hardening.py` (14 tests).
+
+| # | Finding (as found) | Fix |
+|---|---|---|
+| 1 | Unknown `/api/*` returned the SPA shell: **`200 text/html`** for a typo'd path, contradicting the docs/12 error contract | explicit `/api` + `/api/{rest}` catch-alls → `404 {detail:{code:"not_found"}}`, registered after real routers so nothing is shadowed |
+| 2 | `/metrics` (open-alert counts by severity, DB size, session counts) had no auth option and, in prod, would be proxied by Caddy on the **public** edge | Caddyfile `respond @metrics 403` + optional `METRICS_TOKEN` bearer gate (constant-time compare) |
+| 3 | Login brute-force limiting existed **only** as a Caddy `rate_limit` directive — not part of the standard build, so the pinned `caddy:2` image rejects such a file ("unknown directive: rate_limit"). The control existed nowhere. | limiter enforced in the app (`app/ratelimit.py`): 50/10s per IP, on by default in STAGING/PROD, `429` + `Retry-After`, one `auth.rate_limited` audit event per window, bounded key map. Caddyfile rewritten with stock directives only; the optional custom-image layer is documented in `infra/README.md`. |
+| 4 | `infra/README.md` + prod compose instruct `cp .env.example.prod .env`, but the template **did not exist** — and `.gitignore` (`.env.*`) would have silently ignored it if created | added `infra/prod/.env.example.prod`; `.gitignore` negates `!.env.example.*` (verified: template committable, real `.env` / `.env.prod` still ignored) |
+
+Route audit method: walk `app.routes` → `_IncludedRouter.original_router.routes`
+(the pinned FastAPI wraps included routers, so top-level iteration alone sees
+only 21 entries and **zero** `/api/*` — the earlier attempt that reported
+"missing endpoints" was measuring the wrapper, not the app).
+
+Results: **111 `/api` routes audited — 0 without authentication**; the only
+session-auth-without-permission route is `GET /api/auth/me` (correct: any
+authenticated user reads their own identity). The live 200s that triggered
+the audit (`/api/overview`, `/api/admin/users`) were the SPA fallback, not
+data — now they are JSON 404s.
+
+Full suite after the change: **129 passed** (115 + 14 new), `ruff` clean. Live
+checks on a throwaway STAGING instance (`ENV_NAME=STAGING`,
+`LOGIN_RATE_LIMIT=3/60s`, `METRICS_TOKEN` set, seeded temp `DATA_DIR`):
+`/metrics` 401 / 401 (wrong token) / 200 (correct token); logins 401, 401,
+401, then **429** with `Retry-After: 60` and `{"detail":{"code":"rate_limited"}}`;
+exactly one `auth.rate_limited` audit row (`seq 7`, target `ip:127.0.0.1`,
+detail `{limit:3, retry_after_s:60, window_s:60}`) beside the 3 `auth.failed`
+rows. The LOCAL preview is unchanged by design: `/metrics` open, five bad
+logins → five `401`s (no limiter locally).
+
+**Evidence level for finding 3's edge claim** (per the repo's labeling rule):
+*Verified by external sources* — the `rate_limit` directive is supplied by the
+community `mholt/caddy-ratelimit` module, not the standard build, and a stock
+`caddy:2` container rejects a Caddyfile using it. *Not load-tested here*
+(**Blocked**): `caddy validate` needs the binary, and this sandbox has no
+Docker daemon and blocks `release-assets.githubusercontent.com` (two download
+attempts, `curl` and `gh release download`, both failed). The rewritten
+Caddyfile therefore uses only stock directives (`encode`, `header`, `respond`,
+`reverse_proxy`, `@matcher`) — correct by inspection, to be confirmed by
+`caddy validate` on the target host before go-live.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
   live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency

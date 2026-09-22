@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# ...but committed templates for each environment are fine (SEC-073):
+# infra/prod/.env.example.prod, infra/staging/.env.example
+!.env.example.*
 *.pem
 *.key
 secrets/

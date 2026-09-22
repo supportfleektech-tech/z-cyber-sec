@@ -8,7 +8,11 @@ verification evidence.
 
 - **Base path:** `/api/*`; static SPA at `/`; health at `/api/healthz`
   (the only non-auth API endpoint besides login); Prometheus-style
-  `/metrics`.
+  `/metrics` (counts only; optionally bearer-gated with `METRICS_TOKEN`
+  and never served on the public edge — SEC-073).
+- **Unknown API paths:** `/api/*` that matches no route returns
+  `404 {detail:{code:"not_found"}}` — a real JSON 404, never the SPA shell
+  (SEC-073). Requests to non-API paths still return the SPA.
 - **Auth:** cookie session (`HttpOnly`, `SameSite=Strict`; ADR-002).
   Every other endpoint requires a session plus a named permission
   (RBAC). Unauthenticated → `401 {detail:{code:"unauthenticated"}}`;

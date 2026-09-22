@@ -84,11 +84,42 @@ Production guarantees (enforced, not aspirational):
 
 - App container is **non-root (uid/gid 10001)**, no public ports — only the
   internal network. TLS terminates at Caddy (ACME automatic).
-- Login rate-limited at the edge (50 req / 10 s per IP, `Caddyfile`).
+- Login rate-limited **in the app** (50 req / 10 s per IP by default in
+  STAGING/PROD, `app/ratelimit.py`, SEC-073), returning
+  `429 {detail:{code:"rate_limited"}}` + `Retry-After`. This is deliberate:
+  Caddy's `rate_limit` directive is *not* in the stock build, so a Caddyfile
+  using it would be rejected by the pinned `caddy:2` image (a config that
+  cannot load protects nothing). The app-side control is tested.
+- `/metrics` is refused on the public edge (`Caddyfile` → `403`); scrape the
+  internal bind address instead. Set `METRICS_TOKEN` to also require
+  `Authorization: Bearer <token>`.
 - Security headers: HSTS, `nosniff`, `no-referrer`.
 - `SECRET_KEY` + `ENV_NAME=prod` come from `.env` (never committed); the
   backend **refuses to boot** in STAGING/PROD without a real secret (config guard).
 - Resource caps (2 CPU / 2 GiB) and json-file log size caps in compose.
+
+### Optional: edge-level rate limiting (custom image)
+
+If you want a second, edge-level rate limit in addition to the app's, build
+Caddy with the community plugin — the stock image has no such directive:
+
+```dockerfile
+FROM caddy:2-builder-alpine AS builder
+RUN xcaddy build --with github.com/mholt/caddy-ratelimit
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+```
+
+Then add to `Caddyfile` (plugin syntax, **not** valid on stock `caddy:2`):
+
+```text
+@login path /api/auth/login
+rate_limit @login {
+	zone cybersec
+	50r/10s
+	by remote_ip
+}
+```
 
 Secrets: copy `.env.example.prod`, generate `SECRET_KEY`
 (`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`), and fill

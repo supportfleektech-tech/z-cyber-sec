@@ -6,8 +6,14 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
 ## Daily
 - Health: `GET /api/healthz` (200) + `GET /metrics`; disk headroom on the
   data volume; alert pipeline (`/api/soc/alerts?status=new`).
+  - Metrics are internal-only: scrape `http://127.0.0.1:8080/metrics` on the
+    host (the public edge answers `403` by design). If `METRICS_TOKEN` is
+    set, add `-H "Authorization: Bearer $METRICS_TOKEN"`.
+  ```bash
+  curl -s http://127.0.0.1:8080/metrics | grep -E "alerts_open|db_size_bytes"
+  ```
 - Audit: `GET /api/admin/audit` — scan for `auth.failed` bursts,
-  `agent_tool_denied`, `release.*`.
+  `auth.rate_limited` (login brute-force), `agent_tool_denied`, `release.*`.
 - Chain: `GET /api/admin/audit/verify` → `ok: true` (tamper evidence).
 - Backup: confirm today's backup exists in `data/backups/` (or the backup
   job's output) and note its `sha256`.

@@ -29,6 +29,11 @@ class Settings:
     rules_dir: Path = field(default_factory=lambda: BASE_DIR / "rules")
     scenarios_dir: Path = field(default_factory=lambda: BASE_DIR / "scenarios")
     frontend_dist: Path = field(default_factory=lambda: BASE_DIR.parent / "frontend" / "dist")
+    # SEC-073 hardening (see the audit note in docs/13).
+    metrics_token: str | None = None
+    login_rate_limit_enabled: bool = False
+    login_rate_limit: int = 50
+    login_rate_limit_window_s: int = 10
 
     @property
     def db_path(self) -> Path:
@@ -63,6 +68,15 @@ def load_settings() -> Settings:
     s.secret_key = os.environ.get("SECRET_KEY", s.secret_key)
     s.token_ttl_hours = int(os.environ.get("TOKEN_TTL_HOURS", s.token_ttl_hours))
     s.dev_origin = os.environ.get("DEV_ORIGIN") or None
+    # SEC-073: optional bearer gate for /metrics (unset = open, as documented).
+    s.metrics_token = (os.environ.get("METRICS_TOKEN") or "").strip() or None
+    # SEC-073: login brute-force limiting. On by default where it matters —
+    # STAGING/PROD — and off locally so the lab and test suite are unaffected.
+    s.login_rate_limit_enabled = _bool("LOGIN_RATE_LIMIT_ENABLED",
+                                       s.env_name in {"STAGING", "PROD"})
+    s.login_rate_limit = int(os.environ.get("LOGIN_RATE_LIMIT", s.login_rate_limit))
+    s.login_rate_limit_window_s = int(
+        os.environ.get("LOGIN_RATE_LIMIT_WINDOW_S", s.login_rate_limit_window_s))
     s.ensure_dirs()
     if s.env_name in {"STAGING", "PROD"}:
         # ADR-006 boot guard, hardened: no "it works, remember to change it

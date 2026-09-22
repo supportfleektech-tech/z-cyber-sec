@@ -2,7 +2,7 @@
 
 Priority: P0 = prerequisite/blocker; P1 = core; P2 = expansion; P3 = later optimization.
 
-Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for verification evidence.
+Status as of 2026-09-22 (branch `arena/01a0c152-z-cyber-sec`): **45/45 closed** — see docs/13 for verification evidence.
 
 ## P0 — Discover and protect
 - [x] SEC-001 Inventory host, OS, resources, storage, ports, Docker networks/volumes. (docs/01)
@@ -63,3 +63,4 @@ Status as of 2026-09-21 (branch `arena/01a0c152-z-cyber-sec`): see docs/13 for v
 - [x] SEC-070 Capacity-based service extraction if justified. (ADR-008 decision: do NOT extract — measured 3.9k/6.7k ev/s single-process vs. expected volume; quantified revisit triggers; extraction seams already in place (db.py, `_run_detections`, scheduler `tick()`, stateless report builder))
 - [x] SEC-071 Advanced dashboards, saved searches, scheduled reports. (Coverage + purple-team + saved-search panels on /soc; report schedules CRUD + in-process scheduler daemon; retention report on /admin)
 - [x] SEC-072 Cost/resource optimization and retention tuning. (Retention labels + `GET /api/admin/retention/report` report-only per ADR-005; resource limits in compose. Service-extraction cost model = SEC-070, Proposed)
+- [x] SEC-073 API surface hardening from a post-build audit. (4 findings fixed + tested: unknown `/api/*` → JSON 404 not SPA HTML; `/metrics` denied on the public edge + optional `METRICS_TOKEN`; login brute-force limiting moved into the app (`app/ratelimit.py`, 50/10s per IP, on in STAGING/PROD, audited) because the stock `caddy:2` image cannot load `rate_limit`; `infra/prod/.env.example.prod` added + `.gitignore` negation so env templates are committable. Route audit: 111 `/api` routes, 0 unauthenticated. Suite 115 → 129. See docs/13)
