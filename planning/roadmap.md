@@ -12,7 +12,7 @@ genuinely human act (cannot be simulated).
 | 2 Isolation | Network zones, firewall plan, Compose profiles | Isolation tests pass | Code-complete (nftables matrix + validator built; host apply pending — no authorized target host in sandbox) |
 | 3 Core platform | Auth, RBAC, API, DB, audit, dashboard shell | Core E2E and access tests pass | Done (115-test suite, RBAC tested) |
 | 4 Defensive telemetry | Selected SIEM/agent telemetry and synthetic events | Events ingest; detections validated | Done (ingest contract, 3 purple-team scenarios validated) |
-| 5 Modules | Cases, intel, vuln, AppSec, cloud, GRC, reports | Module acceptance tests pass | Done (module tests + scheduled reports + retention report) |
+| 5 Modules | Cases, intel, vuln, AppSec, cloud, GRC, reports | Module acceptance tests pass | Done (module tests + scheduled reports + retention report + adversary tradecraft: exploitability validation, chains, triage reporting — SEC-075) |
 | 6 Agent gateway | Scoped adapters with approvals | Evaluations and approvals pass | Done (builtin/openai_compat/cli adapters, allowlist-bypass denied, evals, approval queue) |
 | 7 Hardening | Security review, restore, capacity, regression | No unresolved release-blocking issue | Done (gitleaks, boot guard, restore drills PASS both modes, capacity measured in-process + live-HTTP, supply-chain CI, SEC-073 API-surface audit: 111 routes / 0 unauthenticated) |
 | 8 Staging | Production-like deploy and acceptance | Release candidate approved | Code-complete (infra/staging stack built; deploy + acceptance on a real staging host pending) |

@@ -55,6 +55,13 @@ def create_agent(body: AgentIn, conn: sqlite3.Connection = Depends(db.get_conn),
         raise HTTPException(400, {"code": "unknown_tools", "message": f"unknown tools: {bad}"})
     if body.adapter not in agent_adapters.ADAPTERS:
         raise HTTPException(400, {"code": "bad_adapter", "message": f"adapter must be one of {agent_adapters.ADAPTERS}"})
+    # SEC-075: a persona changes reasoning style, never permissions. Unknown
+    # personas are refused so a typo cannot silently leave an agent without the
+    # behaviour an operator believes they configured.
+    persona = ((body.adapter_config or {}).get("persona") or "").strip().lower()
+    if persona and persona not in agent_adapters.PERSONAS:
+        raise HTTPException(400, {"code": "bad_persona",
+                                  "message": f"persona must be one of {list(agent_adapters.PERSONAS)}"})
     if db.one(conn, "SELECT id FROM agents WHERE name = ?", (body.name,)):
         raise HTTPException(409, {"code": "exists"})
     now = db.utcnow()
@@ -95,6 +102,13 @@ def update_agent(agent_id: int, body: AgentIn, conn: sqlite3.Connection = Depend
         raise HTTPException(400, {"code": "unknown_tools", "message": f"unknown tools: {bad}"})
     if body.adapter not in agent_adapters.ADAPTERS:
         raise HTTPException(400, {"code": "bad_adapter", "message": f"adapter must be one of {agent_adapters.ADAPTERS}"})
+    # SEC-075: a persona changes reasoning style, never permissions. Unknown
+    # personas are refused so a typo cannot silently leave an agent without the
+    # behaviour an operator believes they configured.
+    persona = ((body.adapter_config or {}).get("persona") or "").strip().lower()
+    if persona and persona not in agent_adapters.PERSONAS:
+        raise HTTPException(400, {"code": "bad_persona",
+                                  "message": f"persona must be one of {list(agent_adapters.PERSONAS)}"})
     conn.execute(
         "UPDATE agents SET provider = ?, role = ?, scope = ?, tools = ?, adapter = ?, adapter_config = ?, updated_at = ? WHERE id = ?",
         (body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools),

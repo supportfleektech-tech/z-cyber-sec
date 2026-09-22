@@ -91,7 +91,7 @@ infra/                   # README + local compose, target-host network matrix, p
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q          # 145 tests
+cd app/backend && .venv/bin/python -m pytest -q          # 191 tests
 cd app/backend && .venv/bin/ruff check app/ scripts/ tests/
 cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
 cd app/frontend && npm run build                         # tsc -b && vite build
@@ -121,6 +121,7 @@ secrets (gitleaks), backend (ruff + rule lint + pytest), frontend
 | [13](docs/13-verification-evidence.md) | Verification & evidence log |
 | [14](docs/14-release-checklist.md) | Release checklist & human approval gate (SEC-064) |
 | [15](docs/15-detection-rules.md) | Detection rule subset, validation & Sigma porting guide (SEC-074) |
+| [16](docs/16-adversary-tradecraft.md) | Adversary tradecraft — The-Xploiter persona, scope guard, chains, triage reporting (SEC-075) |
 | [ADR 001–008](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production, capacity/extraction |
 
 Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·

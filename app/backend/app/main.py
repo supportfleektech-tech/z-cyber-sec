@@ -30,6 +30,7 @@ from .routers import (
     overview,
     reports,
     soc,
+    tradecraft,
     vulns,
 )
 
@@ -37,6 +38,7 @@ API_ROUTERS = [
     overview.router, auth.router, soc.router, cases.router, intel.router, vulns.router,
     appsec.router, cloud.router, grc.router, exercises.router, agents.router,
     automation.router, reports.router, admin.router, assets.router,
+    tradecraft.router,
 ]
 
 

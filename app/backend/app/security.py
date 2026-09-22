@@ -100,6 +100,7 @@ ALL_READ = {
     "overview.read", "soc.read", "cases.read", "intel.read", "vulns.read",
     "appsec.read", "cloud.read", "grc.read", "exercises.read", "reports.read",
     "assets.read", "agents.read", "automation.read", "release.read",
+    "tradecraft.read",
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -107,12 +108,17 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "soc_analyst": set(ALL_READ) | {
         "soc.write", "cases.write", "evidence.upload", "intel.write",
         "vulns.write", "appsec.write", "reports.generate", "agents.task",
+        # SEC-075: recording exploitability reviews is analysis work (the same
+        # tier as vulns.write). What keeps it safe is not role scarcity but the
+        # scope guard: targets must belong to an authorized engagement, and
+        # both the work and every refusal are audited.
+        "tradecraft.write",
     },
     "ir_lead": set(ALL_READ) | {
         "soc.write", "cases.write", "evidence.upload", "evidence.download",
         "intel.write", "vulns.write", "appsec.write", "reports.generate",
         "exercises.write", "automation.write", "automation.run",
-        "agents.approve", "agents.task",
+        "agents.approve", "agents.task", "tradecraft.write",
     },
     "admin": set(ALL_READ) | {
         "soc.write", "cases.write", "evidence.upload", "evidence.download",
@@ -121,6 +127,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "automation.write", "automation.run", "agents.manage", "agents.approve",
         "agents.task", "rules.write", "admin.users", "admin.integrations",
         "admin.flags", "admin.backup", "audit.read", "release.write",
+        "tradecraft.write",
     },
     # Machine identity used by the agent gateway. Minimal, audited scope.
     "agent_service": {"agents.read", "agents.task"},

@@ -303,6 +303,69 @@ matched by a single event.
 Suite: **145 passed** (129 + 16 new in `tests/test_rule_health.py`), ruff clean
 on `app/ scripts/ tests/`.
 
+## SEC-075 adversary tradecraft (The-Xploiter) — Verified, 2026-09-22
+
+Requested integration: an offensive-security persona (pentest/bug bounty/red
+team tradecraft, exploitability validation, attack chaining, triage-ready
+reporting) inside the platform. Integration point is the **existing governed
+agent gateway** (docs/06) plus the **existing authorization model**
+(`exercises`), not a parallel subsystem — so the guardrails are the ones the
+platform already enforces and tests, extended to the new capability.
+
+**Safety architecture (what makes an offensive capability acceptable here):**
+
+| Control | Enforcement |
+|---|---|
+| Authorization | A target must appear in `exercises.targets` for an exercise in status `authorized`/`running`; `planned` grants nothing (verified live: `lab-ctf-target-01` ∈ a *planned* CTF exercise → `in_scope: false`) |
+| Deny by default | No authorized engagement ⇒ no target authorizes anything |
+| Over-broad scope | `0.0.0.0/0`, `::/0`, `*`, `any`, `all` are surfaced in `ignored_entries` with reasons and authorize **nothing** |
+| Refusals are audited | Out-of-scope attempts write `tradecraft.out_of_scope` (target + reason) to the hash-chained log — for top-level targets *and* per-step chain targets |
+| No weaponisation | The agent tool registry contains no shell/exec/scan tool (14 tools, asserted by test); the module records judgements, it does not send traffic |
+| Agent writes gated | `record_exploitability_review` and `propose_attack_chain` are consequential → human approval; read-only `list_scope_targets`/`get_finding` auto-run |
+| Persona ≠ permission | `adapter_config.persona` only edits the system prompt; unknown names refused (`400 bad_persona`) |
+
+**Two real bugs found and fixed while building it:**
+
+1. **Scope widening via `@`.** `_normalize_target` stripped everything before
+   `@` unconditionally (userinfo stripping meant for URLs). A legitimate
+   account-style scope entry — the seeded phish-sim drill authorizes
+   `test1@test.local` — collapsed to `test.local`, silently authorizing the
+   **entire domain**. Fixed: userinfo is stripped only in URL form
+   (`scheme://…`); verified live that `test1@test.local` authorizes itself and
+   not the domain.
+2. **Unaudited step targeting.** `validate_chain` scope-checked per-step
+   targets but did not report them in `out_of_scope`, so a chain step aimed at
+   an un-authorized host produced a 400 with **no audit event**. Fixed: step
+   violations are collected into `out_of_scope` and audited like top-level
+   ones (test asserts the audit row).
+
+**Verified live** (preview server, seeded data):
+
+- Persona: 8 focus areas, 5 principles, 6 use cases, 6 guardrails,
+  eJPT/OSCP/CRTO mapping.
+- Scope: `test1@test.local` → in scope (exercise 1); `lab-ctf-target-01`,
+  `10.42.0.10`, `evil.example.org`, `production-db-01` → all refused.
+- Review policy: out-of-scope → `400` + audit row; `exploitable` without
+  evidence → `400` listing all three missing requirements; `theoretical` →
+  recorded with `triage_ready: false` and the rejection note; a complete
+  review → `201`, `triage_ready: true`, scope `authorized by exercise 1`.
+- Chains: flat low→low → refused ("does not escalate"); escalating 3-step
+  chain → `201 draft`, combined impact `critical`; step-level `vuln_id` links
+  the chain into the finding's report.
+- Triage report: `READY FOR SUBMISSION` with why-it-works, preconditions,
+  reproduction, evidence, impact, attack paths, remediation, confidence.
+- Agent tools: 14 registered; the four tradecraft tools show
+  `read_only` / `requires_approval` correctly; an agent recording a review
+  against an out-of-scope target is refused by the same validator.
+- RBAC: viewer reads (200), viewer writes (403 `tradecraft.write`).
+- Audit: `tradecraft.review_recorded` ×2, `tradecraft.chain_recorded` ×2,
+  `tradecraft.out_of_scope` ×1 (target `production-db-01`); chain verify
+  `ok: true` afterwards — the tamper-evident log still validates.
+
+Suite: **191 passed** (145 + 46 new in `tests/test_tradecraft.py`), ruff clean;
+frontend typecheck + build green (288.15 kB / 80.33 kB gzip). Docs: `docs/16`
+(new), `docs/12` (endpoints), `docs/06` (personas), README index.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
   live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency

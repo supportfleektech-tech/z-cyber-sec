@@ -29,12 +29,48 @@ from .. import db
 from . import policy
 
 ADAPTERS = ("builtin", "openai_compat", "cli")
+
+# SEC-075: selectable personas (adapter_config.persona). A persona shapes the
+# system prompt only — authority stays with the tool allowlist, the approval
+# gate and the scope guard, none of which the adapter can bypass.
+PERSONAS = ("the-xploiter",)
 HTTP_TIMEOUT = 30.0
 CLI_TIMEOUT = 60.0
 
 
 class AdapterError(ValueError):
     pass
+
+
+def system_prompt(agent: dict, config: dict | None = None) -> str:
+    """Base system prompt, extended by a persona when the agent declares one.
+
+    Personas (SEC-075) shape *how* an agent reasons — they never widen what it
+    may do. Tool allowlist, approval gating and scope checks are enforced below
+    the adapter, so a persona cannot grant a capability.
+    """
+    base = ("You are a scoped cybersecurity assistant. Choose ONE tool "
+            "call from the allowed tools to make progress on the request. "
+            "If no allowed tool applies, answer with a final message.")
+    cfg = config if config is not None else (db.jload(agent.get("adapter_config"), {}) or {})
+    persona = (cfg.get("persona") or "").strip().lower()
+    if not persona:
+        return base
+    from . import tradecraft as tc
+    if persona != tc.PERSONA["codename"].lower():
+        return base
+    principles = "; ".join(p["principle"] for p in tc.PERSONA["design_principles"])
+    guardrails = " ".join(tc.PERSONA["guardrails"])
+    return (
+        f"{base}\n\nAdopt the '{tc.PERSONA['codename']}' persona: {tc.PERSONA['summary']} "
+        f"Operating principles: {principles}. "
+        "Report only what your tools actually returned; never invent evidence, "
+        "targets or exploit results. Ask 'is this actually exploitable, under "
+        "which preconditions, and what would an attacker do next' before "
+        "answering. Prefer explaining WHY a behaviour is exploitable over "
+        "restating WHAT was found. "
+        f"Hard limits: {guardrails}"
+    )
 
 
 def _tool_schemas(agent: dict) -> list[dict]:
@@ -67,7 +103,7 @@ def resolve_steps(agent: dict, request: dict) -> dict:
         raise AdapterError(
             "builtin adapter has no brain — send an explicit 'tool' or 'steps' request")
     if adapter == "openai_compat":
-        steps = _openai_compat(prompt, config, _tool_schemas(agent))
+        steps = _openai_compat(prompt, config, _tool_schemas(agent), agent)
     elif adapter == "cli":
         steps = _cli(prompt, config, _tool_schemas(agent))
     else:
@@ -77,7 +113,7 @@ def resolve_steps(agent: dict, request: dict) -> dict:
 
 # ---------------------------------------------------------------- backends
 
-def _openai_compat(prompt: str, config: dict, tools: list[dict]) -> list[dict]:
+def _openai_compat(prompt: str, config: dict, tools: list[dict], agent: dict) -> list[dict]:
     base_url = (config.get("base_url") or "").rstrip("/")
     model = config.get("model") or "local-model"
     if not base_url:
@@ -89,10 +125,7 @@ def _openai_compat(prompt: str, config: dict, tools: list[dict]) -> list[dict]:
     body = {
         "model": model,
         "messages": [
-            {"role": "system",
-             "content": ("You are a scoped cybersecurity assistant. Choose ONE tool "
-                         "call from the allowed tools to make progress on the request. "
-                         "If no allowed tool applies, answer with a final message.")},
+            {"role": "system", "content": system_prompt(agent, config)},
             {"role": "user", "content": prompt},
         ],
         "tools": [{"type": "function", "function": {

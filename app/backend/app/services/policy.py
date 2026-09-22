@@ -128,6 +128,80 @@ def _request_report(conn, args):
     return {"queued": True, "kind": kind, "note": "generate via reports API (audited)"}
 
 
+# --- SEC-075 adversary tradecraft (The-Xploiter) -----------------------------
+# The read-only tools let an agent reason about what it may touch and what is
+# actually known about a finding. The consequential ones write assessment
+# records and are therefore approval-gated, like every other write here.
+
+def _list_scope_targets(conn, args):
+    """Authorized targets only. An agent cannot enumerate anything else."""
+    from . import tradecraft as tc
+    summary = tc.scope_summary(conn)
+    return {"authorized_targets": summary["authorized"], "rule": summary["rule"],
+            "ignored_overbroad_entries": summary["ignored_entries"]}
+
+
+def _get_finding(conn, args):
+    from . import tradecraft as tc
+    try:
+        vuln_id = int(args["vuln_id"])
+    except (KeyError, TypeError, ValueError):
+        return {"error": "vuln_id (int) is required"}
+    ctx = tc.vuln_context(conn, vuln_id)
+    if not ctx:
+        return {"error": "finding not found"}
+    f = ctx["finding"]
+    return {"finding": {k: f.get(k) for k in ("id", "title", "severity", "cvss", "status",
+                                              "cve_id", "asset_id", "description")},
+            "reviews": [{"verdict": r["verdict"], "triage_ready": r["triage_ready"],
+                         "rationale": r["rationale"], "target": r["target"]}
+                        for r in ctx["reviews"]],
+            "chains": [{"id": c["id"], "title": c["title"], "status": c["status"]}
+                       for c in ctx["chains"]]}
+
+
+def _record_exploitability_review(conn, args):
+    """Consequential: writes an assessment record. Approval-gated."""
+    from . import tradecraft as tc
+    decision = tc.validate_review(conn, args or {})
+    if not decision["ok"]:
+        return {"error": "review rejected", "errors": decision["errors"]}
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO exploitability_reviews (vuln_id, exercise_id, target, verdict, trust_boundary, "
+        "impact_before, impact_after, preconditions, evidence, reproduction, rationale, triage_ready, "
+        "policy_note, dedupe_key, reviewed_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (args.get("vuln_id"), (decision["scope"] or {}).get("exercise_id"), args.get("target"),
+         args.get("verdict"), args.get("trust_boundary"), args.get("impact_before"),
+         args.get("impact_after"), db.jdump(args.get("preconditions") or []),
+         db.jdump(args.get("evidence") or []), args.get("reproduction"), args.get("rationale"),
+         1 if decision["triage_ready"] else 0, decision["policy_note"],
+         tc._fingerprint(args.get("target"), None, None), "agent", now))
+    conn.commit()
+    return {"review_id": cur.lastrowid, "triage_ready": decision["triage_ready"],
+            "policy_note": decision["policy_note"]}
+
+
+def _propose_attack_chain(conn, args):
+    """Consequential: writes a chain record. Approval-gated."""
+    from . import tradecraft as tc
+    decision = tc.validate_chain(conn, args or {})
+    if not decision["ok"]:
+        return {"error": "chain rejected", "errors": decision["errors"]}
+    steps = [{**s, "order": s.get("order") or i} for i, s in enumerate(args.get("steps") or [], 1)]
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO attack_chains (exercise_id, title, entry_point, trust_boundary, steps, "
+        "combined_impact, status, escalation_note, rationale, meta, created_by, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?, 'draft', ?, ?, ?, 'agent', ?, ?)",
+        (args.get("exercise_id"), args.get("title"), args.get("entry_point"),
+         args.get("trust_boundary"), db.jdump(steps), args.get("combined_impact"),
+         args.get("escalation_note"), args.get("rationale"),
+         db.jdump({"targets": args.get("targets") or []}), now, now))
+    conn.commit()
+    return {"chain_id": cur.lastrowid, "status": "draft", "steps": len(steps)}
+
+
 def _create_case(conn, args):
     title = (args.get("title") or "").strip()
     if not title or len(title) > 200:
@@ -187,6 +261,18 @@ TOOL_REGISTRY: dict[str, dict] = {
                     "description": "Open a new case from an alert. REQUIRES APPROVAL."},
     "contain_asset": {"fn": _contain_asset, "read_only": False,
                       "description": "Simulate containment of an asset. REQUIRES APPROVAL."},
+    # SEC-075 — tradecraft. Note there is still no shell/scanning tool: an agent
+    # reasons over authorized scope and recorded findings; it does not attack.
+    "list_scope_targets": {"fn": _list_scope_targets, "read_only": True,
+                           "description": "List targets authorized by an active engagement (read-only)."},
+    "get_finding": {"fn": _get_finding, "read_only": True,
+                    "description": "Read one finding with its exploitability reviews and chains."},
+    "record_exploitability_review": {
+        "fn": _record_exploitability_review, "read_only": False,
+        "description": "Record an exploitability verdict with evidence. REQUIRES APPROVAL."},
+    "propose_attack_chain": {
+        "fn": _propose_attack_chain, "read_only": False,
+        "description": "Propose a multi-step attack chain. REQUIRES APPROVAL."},
 }
 
 

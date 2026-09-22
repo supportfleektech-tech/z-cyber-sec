@@ -37,6 +37,21 @@ verification evidence.
 ### Overview (`/api/overview`)
 `GET /stats` · `GET /alert-trend` · `GET /services` · `GET /integrations` — dashboard KPIs.
 
+### Tradecraft — The-Xploiter (`/api/tradecraft`)  ·  SEC-075
+| Method & path | Purpose | Permission |
+|---|---|---|
+| `GET /persona` · `GET /rubric` | Persona spec; verdict/evidence policy | `tradecraft.read` |
+| `GET /scope` · `GET /scope/check?target=` | Authorized targets; deny-by-default check | `tradecraft.read` |
+| `GET/POST /reviews` | Exploitability verdicts with evidence (see docs/16) | read / `tradecraft.write` |
+| `GET /duplicates` | Fingerprint clusters (bug bounty signal-to-noise) | `tradecraft.read` |
+| `GET/POST /chains` · `POST /chains/{id}/status` | Attack chains; human validate/reject with rationale | read / `tradecraft.write` |
+| `GET /findings/{id}/triage-report` | Triage-ready markdown draft (READY / NOT SUBMITTABLE) | `tradecraft.read` |
+| `GET /stats` | Review/chain counters incl. rejected-as-theoretical | `tradecraft.read` |
+
+Targeted writes are scope-checked against exercises in status
+`authorized`/`running`; out-of-scope attempts return `400` **and** write
+`tradecraft.out_of_scope` to the audit chain.
+
 ### SOC (`/api/soc`)
 | Method & path | Purpose |
 |---|---|

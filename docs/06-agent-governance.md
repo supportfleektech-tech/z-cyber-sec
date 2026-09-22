@@ -19,3 +19,13 @@
 
 ## Evaluation
 Test tool authorization, prompt-injection resistance, refusal of out-of-scope targets, timeout behavior, failure reporting, and truthful completion claims.
+
+## Personas (SEC-075)
+
+An agent may declare `adapter_config.persona` (currently `the-xploiter`);
+the persona is injected into the system prompt only. It cannot widen
+authority: the tool allowlist, the approval gate and the target scope guard
+all sit below the adapter. Unknown persona names are refused at creation.
+Consequential tradecraft tools (`record_exploitability_review`,
+`propose_attack_chain`) require human approval exactly like `create_case`,
+and both go through the same validators the API uses.
