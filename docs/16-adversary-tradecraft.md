@@ -55,6 +55,17 @@ work. Specifically:
 - **Over-broad entries authorize nothing.** `0.0.0.0/0`, `::/0`, `*`, `any`,
   `all` are listed in `GET /api/tradecraft/scope` under `ignored_entries` with
   a reason — they are visible, and inert.
+- **Authorization is bounded in time.** An engagement carries
+  `starts_at`/`ends_at`, and a window that has lapsed (or not yet begun)
+  authorizes nothing — *an authorization that ended on the 13th does not
+  authorize work on the 22nd*. The scope summary reports `window_state`
+  (`active` / `expired` / `not_started` / `open`) per entry and lists lapsed
+  engagements under `expired_engagements` with the renewal note, so the reason
+  is visible in the UI rather than discovered as a mysterious refusal. A
+  refusal caused by a lapsed window names the engagement and the date —
+  "not listed in any exercise" would send an operator hunting for a missing
+  entry when the fix is to renew the engagement. An engagement with no dates
+  recorded is treated as `open` (open-ended), which is reported as such.
 - **Refusals are governance events.** An out-of-scope attempt is not only a
   `400`: it writes `tradecraft.out_of_scope` to the hash-chained audit log with
   the target and the reason. Attempting to work outside scope is visible.

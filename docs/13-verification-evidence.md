@@ -433,7 +433,58 @@ the stock image, `/metrics` 403 on the edge, JSON 404 for unknown API paths,
 so the new engagement deliverable was API-only. `Reports.tsx` now lists
 `tradecraft`.
 
-Suite: **214 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-077 — authorization windows are enforced (not decorative)
+
+**Defect found in the course of SEC-076 verification.** Exercised the scope guard
+against the seeded engagement and found the authorization window was never
+evaluated: `10.42.0.10` was listed as *usable* on **2026-09-22** from an
+engagement whose window had ended **2026-09-13**. The guard rested on
+`status IN ('authorized','running')` alone, so a written authorization silently
+outlived the permission it rests on — the one bound a pentest engagement
+actually turns on. The seed made it invisible by carrying an already-lapsed
+window (09-12 → 09-13).
+
+Fixed in `app/services/tradecraft.py`:
+
+- `_window_state(starts_at, ends_at, today)` → `expired` / `not_started` /
+  `active` / `open`. Missing dates = `open` (no window claimed, reported as
+  open-ended rather than quietly trusted). Inclusive of the last day.
+- `authorized_targets()` marks entries of a lapsed or not-yet-started
+  engagement unusable and carries `starts_at`/`ends_at`/`window_state` per row.
+- `check_target()` refuses with the **real cause**: *"target matches exercise 1
+  (Synthetic Phish Drill Q3), but that engagement does not authorize work right
+  now: authorization window ended 2020-01-31 — renew the engagement"*. The old
+  generic "not listed in any exercise" would have sent an operator hunting for a
+  missing entry when the fix is to renew the engagement.
+- `scope_summary()` adds `expired_engagements`; the rule text states the window
+  requirement. `/tradecraft` shows a **window_state** column, an explicit
+  lapsed-engagement warning block, and the stat card now reads "in-force
+  authorization windows".
+- Seed: the demo engagement's window now extends 30 days past today, with a
+  comment explaining why an example must not be born expired (a test asserts it).
+
+Verified (live, preview server on :8080, DB window set to expire 2026-09-01):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | `GET /api/tradecraft/scope` before fix | `10.42.0.10` usable on 09-22 despite window ending 09-13 — **BUG** |
+| 2 | Review against lapsed engagement | `400 bad_review`; refusal names exercise, window and fix |
+| 3 | Same review after renewal (window to 11-21) | `201` recorded, `window_state: active` |
+| 4 | `expired_engagements` in scope summary | `[[1, "Synthetic Phish Drill Q3", "authorization window ended 2026-09-01 — renew the engagement"]]` |
+| 5 | Future window (2099) | refused, reason "not in force yet", not usable |
+| 6 | No window recorded | `window_state: open`, usable — and labelled as open-ended |
+| 7 | Over-broad entry (`0.0.0.0/0`) | refused with "over-broad scope entry authorizes nothing" |
+| 8 | Unrelated host | generic "not listed in any exercise" message retained |
+
+Also in this pass: the `exploitable` refusal now states the reproduction minimum
+("at least 20 characters") — the previous wording rejected an undersized
+reproduction without saying what size was expected, which reads as a false
+negative to the person who just wrote it.
+
+Suite 214 → **222 passed**, ruff clean, `lint_rules` 6/6 compile, frontend
+typecheck + build green (290.66 kB / 81.07 kB gzip).
+
+Suite: **222 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.

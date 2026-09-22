@@ -346,7 +346,10 @@ def seed_all(conn) -> dict:
          "Authorized internal simulation ONLY: synthetic phishing email to volunteer test accounts on the lab "
          "identity provider. No external sending. Scope limited to accounts: test1@test.local, test2@test.local. "
          "Written authorization on file (synthetic).",
-         (now - timedelta(days=10)).strftime("%Y-%m-%d"), (now - timedelta(days=9)).strftime("%Y-%m-%d"),
+         # SEC-077: the window must be IN FORCE — an expired authorization
+         # authorizes nothing (the scope guard enforces the end date), and a
+         # seeded example that had lapsed would teach the wrong pattern.
+         (now - timedelta(days=10)).strftime("%Y-%m-%d"), (now + timedelta(days=30)).strftime("%Y-%m-%d"),
          db.jdump(["test1@test.local", "test2@test.local"]), db.jdump({"kind": "phish-sim"}),
          db.utcnow(), db.utcnow()))
     ex1 = db.one(conn, "SELECT id FROM exercises WHERE name='Synthetic Phish Drill Q3'")

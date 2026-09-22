@@ -23,8 +23,13 @@ interface Persona {
   certification_mapping: { cert: string; focus: string }[];
 }
 interface ScopeSummary {
-  authorized: { exercise_id: number; exercise: string; status: string; owner: string | null; target: string; usable: boolean }[];
-  ignored_entries: { exercise_id: number; exercise: string; target: string; note: string | null }[];
+  authorized: {
+    exercise_id: number; exercise: string; status: string; owner: string | null;
+    target: string; usable: boolean;
+    starts_at: string | null; ends_at: string | null; window_state: string;
+  }[];
+  ignored_entries: { exercise_id: number; exercise: string; target: string; note: string | null; window_state?: string }[];
+  expired_engagements: [number, string, string][];
   deny_by_default: boolean;
   rule: string;
 }
@@ -110,7 +115,7 @@ export default function Tradecraft() {
       <div className="grid cols-3 mb">
         <div className="stat"><div className="k">authorized targets</div>
           <div className="v">{stats.data?.authorized_targets ?? "—"}</div>
-          <div className="s">from authorized/running engagements</div></div>
+          <div className="s">in-force authorization windows</div></div>
         <div className="stat"><div className="k">reviews</div>
           <div className="v">{stats.data?.reviews ?? "—"}</div>
           <div className="s">{stats.data?.reviews_triage_ready ?? 0} triage-ready</div></div>
@@ -164,13 +169,17 @@ export default function Tradecraft() {
           <h2>Authorized scope</h2>
           <LoadBlock loading={scope.loading} error={scope.error} empty={!scope.data?.authorized?.length}>
             <table className="tbl">
-              <thead><tr><th>Target</th><th>Engagement</th><th>Status</th><th>Owner</th></tr></thead>
+              <thead><tr><th>Target</th><th>Engagement</th><th>Status</th><th>Authority</th><th>Owner</th></tr></thead>
               <tbody>
                 {scope.data!.authorized.map((t) => (
                   <tr key={`${t.exercise_id}-${t.target}`}>
                     <td className="mono">{t.target}</td>
                     <td>{t.exercise}</td>
                     <td><StBadge value={t.status} /></td>
+                    <td className="dim">
+                      {t.window_state === "open" ? "open-ended"
+                        : t.ends_at ? `until ${String(t.ends_at).slice(0, 10)}` : "—"}
+                    </td>
                     <td className="dim">{t.owner || "—"}</td>
                   </tr>
                 ))}
@@ -178,9 +187,24 @@ export default function Tradecraft() {
             </table>
           </LoadBlock>
           {scope.data && scope.data.authorized.length === 0 && (
-            <div className="faint">
-              No authorized engagement — create an exercise and move it to <code>authorized</code>{" "}
-              on the Exercises page before recording tradecraft work.
+            <div className={scope.data.expired_engagements.length ? "inert-warn" : "faint"}>
+              No engagement currently authorizes work.{" "}
+              {scope.data.expired_engagements.length > 0 ? (
+                <>
+                  {scope.data.expired_engagements.map(([id, name, note]) => (
+                    <div key={id} className="faint">
+                      #{id} “{name}”: {note}
+                    </div>
+                  ))}
+                  Extend the window on the Exercises page — an authorization that has lapsed is
+                  not an authorization, so reviews and chains against it are refused.
+                </>
+              ) : (
+                <>
+                  Create an exercise and move it to <code>authorized</code> on the Exercises page
+                  before recording tradecraft work.
+                </>
+              )}
             </div>
           )}
           {scope.data && scope.data.ignored_entries.length > 0 && (

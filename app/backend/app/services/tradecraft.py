@@ -36,6 +36,7 @@ import hashlib
 import ipaddress
 import re
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 
 from .. import db
@@ -243,17 +244,49 @@ def _matches(entry: str, target: str) -> bool:
     return False
 
 
-def authorized_targets(conn: sqlite3.Connection) -> list[dict]:
-    """Every target currently authorizing tradecraft work (flattened, with owner)."""
+def _window_state(starts_at, ends_at, today: str) -> tuple[str, str | None]:
+    """(state, note) for an engagement's authorization window.
+
+    Authority is bounded in time: a written authorization that says "until
+    Friday" stops authorizing on Saturday. Treating an expired engagement as
+    live would mean the control quietly outlives the permission it rests on.
+    Missing dates are treated as open-ended (state 'open') — explicit is
+    better, but an engagement with no end date has not claimed one.
+    """
+    start = (str(starts_at)[:10] if starts_at else "") or ""
+    end = (str(ends_at)[:10] if ends_at else "") or ""
+    if end and end < today:
+        return "expired", f"authorization window ended {end} — renew the engagement"
+    if start and start > today:
+        return "not_started", f"authorization window starts {start} — not in force yet"
+    if not start and not end:
+        return "open", "no window recorded — open-ended authorization"
+    return "active", None
+
+
+def authorized_targets(conn: sqlite3.Connection, today: str | None = None) -> list[dict]:
+    """Every target currently authorizing tradecraft work (flattened, with owner).
+
+    A target authorizes work only when its engagement is `authorized`/`running`
+    **and** its window is in force. Over-broad entries and out-of-window
+    engagements are still listed, but as unusable with the reason — visible,
+    and inert.
+    """
+    today = today or datetime.now(UTC).strftime("%Y-%m-%d")
     rows = db.q(conn, "SELECT id, name, status, targets, owner, starts_at, ends_at "
                       "FROM exercises WHERE status IN ('authorized', 'running') ORDER BY id")
     out = []
     for r in rows:
+        state, note = _window_state(r.get("starts_at"), r.get("ends_at"), today)
         for entry in (db.jload(r.get("targets"), []) or []):
             ok, why = _scope_entry_valid(str(entry))
+            if ok and state in ("expired", "not_started"):
+                ok, why = False, note
             out.append({
                 "exercise_id": r["id"], "exercise": r["name"], "status": r["status"],
                 "owner": r.get("owner"), "target": entry,
+                "starts_at": r.get("starts_at"), "ends_at": r.get("ends_at"),
+                "window_state": state,
                 "usable": ok, "note": why or None,
             })
     return out
@@ -271,6 +304,20 @@ def check_target(conn: sqlite3.Connection, target: str) -> dict:
             return {"in_scope": True, "reason": f"authorized by exercise {row['exercise_id']}",
                     "exercise_id": row["exercise_id"], "exercise": row["exercise"],
                     "matched_entry": row["target"]}
+    # The target may match an entry that exists but cannot authorize work
+    # (lapsed window, over-broad entry). Answering "not listed in any exercise"
+    # there sends the operator hunting for a missing entry when the real fix is
+    # to renew the engagement — the refusal must name the actual cause.
+    lapsed = [r for r in authorized_targets(conn)
+              if not r["usable"] and _matches(str(r["target"]), target)]
+    if lapsed:
+        row = lapsed[0]
+        return {
+            "in_scope": False,
+            "reason": (f"target matches exercise {row['exercise_id']} ({row['exercise']}), but "
+                       f"that engagement does not authorize work right now: {row['note']}"),
+            "exercise_id": None, "exercise": None,
+        }
     return {
         "in_scope": False,
         "reason": ("target is not listed in any exercise in status authorized/running "
@@ -281,12 +328,16 @@ def check_target(conn: sqlite3.Connection, target: str) -> dict:
 
 def scope_summary(conn: sqlite3.Connection) -> dict:
     rows = authorized_targets(conn)
+    ignored = [r for r in rows if not r["usable"]]
     return {
         "authorized": [r for r in rows if r["usable"]],
-        "ignored_entries": [r for r in rows if not r["usable"]],
+        "ignored_entries": ignored,
+        "expired_engagements": sorted({(r["exercise_id"], r["exercise"], r["note"])
+                                       for r in ignored if r["window_state"] == "expired"}),
         "deny_by_default": True,
-        "rule": ("Only targets of exercises in status authorized/running authorize "
-                 "work; anything else is refused and audited."),
+        "rule": ("Only targets of exercises in status authorized/running, with an "
+                 "authorization window currently in force, authorize work; anything "
+                 "else is refused and audited."),
     }
 
 
@@ -330,7 +381,7 @@ def validate_review(conn: sqlite3.Connection, payload: dict) -> dict:
                           "request/response, or artifact reference)")
         if len((payload.get("reproduction") or "").strip()) < 20:
             errors.append("an 'exploitable' verdict requires reproduction steps another "
-                          "engineer can follow")
+                          "engineer can follow (at least 20 characters)")
         if not (payload.get("impact_after") or "").strip():
             errors.append("an 'exploitable' verdict requires an impact statement (impact_after)")
     if verdict == "not_exploitable" and not _has_content(payload.get("evidence")):

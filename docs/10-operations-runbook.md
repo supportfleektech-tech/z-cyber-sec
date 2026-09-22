@@ -27,6 +27,11 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
   (report only; any deletion is a human, audited act, ADR-005).
 - Coverage: `GET /api/soc/rules/coverage` — new `gaps` = active rules that
   never fired (tune rule or add scenario, docs/12).
+- Engagements: `GET /api/tradecraft/scope` — `expired_engagements` must be
+  empty. A lapsed window silently stops authorizing tradecraft work (its
+  findings would then be refused), so renew it, or close the exercise out with
+  a report, before it lapses. Rolling windows should be extended while work is
+  still planned.
 - Capacity: run the capacity gate (Monthly in small labs; Weekly if event
   volume is growing):
   ```bash

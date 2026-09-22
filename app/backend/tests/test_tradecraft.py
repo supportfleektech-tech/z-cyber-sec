@@ -404,6 +404,86 @@ def test_duplicates_cluster_by_fingerprint(client, seeded):
     assert len(clusters[0]["reviews"]) == 2
 
 
+# ------------------------------------------------ SEC-077: authorization windows
+
+def _exercise_with_window(seeded, conn, start, end, status="authorized"):
+    conn.execute("UPDATE exercises SET starts_at=?, ends_at=?, status=? WHERE id=1",
+                 (start, end, status))
+    conn.commit()
+
+
+def test_expired_authorization_stops_authorizing(client, seeded, conn):
+    """Authority is bounded in time: an authorization that ended on the 13th
+    does not authorize work on the 22nd."""
+    _exercise_with_window(seeded, conn, "2020-01-01", "2020-01-31")
+    summary = client.get("/api/tradecraft/scope").json()
+    assert summary["authorized"] == []
+    assert [e[1] for e in summary["expired_engagements"]] == ["Synthetic Phish Drill Q3"]
+    assert tradecraft.check_target(conn, "test1@test.local")["in_scope"] is False
+
+
+def test_future_authorization_does_not_authorize_yet(client, seeded, conn):
+    _exercise_with_window(seeded, conn, "2099-01-01", "2099-12-31")
+    assert client.get("/api/tradecraft/scope").json()["authorized"] == []
+    assert tradecraft.check_target(conn, "test1@test.local")["in_scope"] is False
+
+
+def test_window_states_and_open_ended_rules():
+    """Boundary behaviour of the window evaluator, including a window that is
+    inclusive of its own last day and an unrecorded one."""
+    f = tradecraft._window_state
+    assert f("2026-09-01", "2026-09-22", "2026-09-22")[0] == "active"   # last day still counts
+    assert f("2026-09-01", "2026-09-21", "2026-09-22")[0] == "expired"
+    assert f("2026-09-23", "2026-09-30", "2026-09-22")[0] == "not_started"
+    assert f(None, None, "2026-09-22")[0] == "open"
+    assert f("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z", "2026-09-22")[0] == "active"  # timestamps
+
+
+def test_refusal_names_the_real_cause(client, seeded, conn):
+    """A refusal that says "not listed in any exercise" when the engagement
+    exists but lapsed would send the operator hunting for a missing entry."""
+    _exercise_with_window(seeded, conn, "2020-01-01", "2020-01-31")
+    decision = tradecraft.check_target(conn, "test1@test.local")
+    assert decision["in_scope"] is False
+    assert "Synthetic Phish Drill Q3" in decision["reason"]      # names the engagement
+    assert "window ended 2020-01-31" in decision["reason"]       # names the fix
+    # a target with no entry at all keeps the generic message
+    assert "not listed in any exercise" in tradecraft.check_target(conn, "9.9.9.9")["reason"]
+
+
+def test_refusal_for_future_window_says_not_in_force(client, seeded, conn):
+    _exercise_with_window(seeded, conn, "2099-01-01", "2099-12-31")
+    reason = tradecraft.check_target(conn, "test1@test.local")["reason"]
+    assert "not in force yet" in reason and "2099-01-01" in reason
+
+
+def test_review_error_states_the_reproduction_requirement(client, seeded, conn):
+    """An error that just says 'requires reproduction steps' when the caller
+    supplied one leaves them guessing; the minimum must be stated."""
+    _exercise_with_window(seeded, conn, "2020-01-01", "2099-01-01")
+    r = client.post("/api/tradecraft/reviews",
+                    json={**GOOD_REVIEW, "reproduction": "too short"})
+    assert r.status_code == 400
+    assert "at least 20 characters" in json.dumps(r.json())
+
+
+def test_live_window_still_authorizes(client, seeded, conn):
+    """The guard must not become useless: a window in force still works."""
+    _exercise_with_window(seeded, conn, "2020-01-01", "2099-01-01")
+    assert len(client.get("/api/tradecraft/scope").json()["authorized"]) == 2
+    assert tradecraft.check_target(conn, "test1@test.local")["in_scope"] is True
+
+
+def test_seed_window_is_in_force():
+    """A demo engagement must not be born expired, or the first thing a user
+    learns from the feature is a refusal."""
+    import inspect
+
+    from app.seed import seed_demo
+    src = inspect.getsource(seed_demo.seed_all)
+    assert 'now + timedelta(days=30)' in src, "seeded exercise window should extend past today"
+
+
 def test_fingerprint_is_invariant_under_presentation_noise():
     """The dedupe key must survive how a human typed the submission, or the
     same finding lands in two clusters and the feature does nothing."""

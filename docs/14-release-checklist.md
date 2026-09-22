@@ -43,8 +43,9 @@ Date (UTC): ____   Approver (human, name + role): ____
 - [ ] Unknown API path returns JSON, not the SPA (SEC-073):
       `curl -s -o /dev/null -w '%{http_code}' https://<domain>/api/nope` → `404`
 - [ ] Detection rules all compile (SEC-074): `python -m scripts.lint_rules` → exit 0
-- [ ] Tradecraft guardrails intact (SEC-075/076): `GET /api/tradecraft/scope` lists only
-      targets of authorized/running exercises; an out-of-scope review is refused with
+- [ ] Tradecraft guardrails intact (SEC-075/076/077): `GET /api/tradecraft/scope` lists
+      only targets of authorized/running exercises **with an in-force authorization
+      window** (`expired_engagements` empty); an out-of-scope review is refused with
       `400` AND appears as `tradecraft.out_of_scope` in the audit log
 
 ## Rollout plan
