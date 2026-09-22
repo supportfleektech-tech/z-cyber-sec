@@ -138,6 +138,47 @@ An agent can read authorized scope and a finding's context freely, but cannot
 write an assessment record without a human approving it. Both paths run the
 same validators, so an agent cannot record a claim a human could not.
 
+## Engagement deliverable
+
+`POST /api/reports` with `{kind: "tradecraft"}` renders the engagement report
+(schedulable like any other kind, e.g. a weekly digest):
+
+- **Engagement summary** — reviews recorded, how many met the evidence
+  standard, how many were rejected/disproven, chains (with how many are
+  validated).
+- **Findings ready for submission** — the triage-ready table, or an explicit
+  "none has met the evidence standard".
+- **Attack chains** — rendered as *paths* (entry point → steps → combined
+  impact), because that is where the severity actually comes from.
+- **Rejected & disproven** — included on purpose. A deliverable that lists only
+  what was reported hides the discipline behind it; showing the theoretical and
+  non-exploitable verdicts (with reasons) is what lets a client or triager
+  trust the rest. It is also the answer to "did you test this?" — yes, and here
+  is why it did not stand up.
+
+Regenerate after each working session; the file is hashed and audited like
+every other report.
+
+## Agent arguments: prose vs. identifiers
+
+Agent tool arguments pass through an injection heuristic
+(`policy.validate_args`). Applied to *every* field it rejected ordinary
+engagement prose — a reproduction step reading "run
+``curl -s http://target/api``" is not an injection attempt, and a tool that
+refuses to record it cannot do its job (SEC-076).
+
+Tools therefore declare `text_fields`: free text that is **stored as data and
+never interpreted** (reproduction, rationale, evidence, escalation notes, chain
+steps). Those are length-capped (8000 chars/entry, 50 entries) instead of
+pattern-blocked. Every other field keeps the strict check, and the declaration
+is per-tool: the same arguments are still refused for a tool that did not
+declare them.
+
+Nothing here executes anything — the registry has no execution primitive at
+all — so this is a scoping fix, not a relaxation of a safety boundary. The
+approval gate for consequential tools is unaffected: a review recorded by an
+agent still waits for a human.
+
 ## Certification use
 
 The persona carries an explicit mapping (eJPT: methodology and exploit

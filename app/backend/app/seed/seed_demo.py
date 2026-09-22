@@ -382,11 +382,22 @@ def seed_all(conn) -> dict:
          {"modules": ["automation"]},
          ["query_events", "get_alerts", "summarize_alerts", "list_assets", "list_vulns",
           "fetch_indicator", "create_case"]),
+        ("the-xploiter", "local-llm", "offensive security reasoning, validation and reporting",
+         {"kind": "adversary-tradecraft"},
+         ["list_scope_targets", "get_finding", "record_exploitability_review", "propose_attack_chain"]),
     ]
     for name, provider, role, scope, tools in agents:
         conn.execute("INSERT INTO agents (name, provider, role, scope, tools, status, created_at, updated_at) "
                      "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
                      (name, provider, role, db.jdump(scope), db.jdump(tools), db.utcnow(), db.utcnow()))
+    # SEC-076: The-Xploiter (SEC-075) is discoverable on a fresh install. Its
+    # adapter points at a local OpenAI-compatible model (Ollama is the
+    # zero-budget option); without one running, prompts fail loudly while the
+    # explicit tool path still works. The persona shapes the system prompt only.
+    conn.execute(
+        "UPDATE agents SET adapter = 'openai_compat', adapter_config = ? WHERE name = 'the-xploiter'",
+        (db.jdump({"base_url": "http://127.0.0.1:11434/v1", "model": "llama3",
+                   "persona": "the-xploiter"}),))
     counts["agents"] = len(agents)
 
     # historical agent task (completed read-only)

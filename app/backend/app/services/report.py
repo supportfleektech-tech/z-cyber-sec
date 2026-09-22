@@ -105,7 +105,90 @@ class ReportBuilder:
             return self._intel(actor, filters)
         if kind == "vulns":
             return self._vulns(actor, filters)
+        if kind == "tradecraft":
+            return self._tradecraft(actor, filters)
         raise ValueError(f"unknown report kind: {kind}")
+
+    def _tradecraft(self, actor, filters):
+        """Engagement deliverable (SEC-076).
+
+        Two things make this different from a findings dump, and both are the
+        point of the tradecraft workflow:
+
+        - **Chains are rendered as paths**, because that is where severity
+          actually comes from (entry point -> steps -> combined impact).
+        - **Rejections are included.** A deliverable that shows only what was
+          reported hides the discipline behind it; listing the theoretical and
+          non-exploitable verdicts is what a client (or a hostile triager)
+          needs in order to believe the rest.
+        """
+        verdict = filters.get("verdict")
+        where, params = "", ()
+        if verdict:
+            where = " WHERE r.verdict = ?"
+            params = (verdict,)
+        reviews = db.q(self.conn,
+                       "SELECT r.*, v.title AS finding_title, v.severity AS finding_severity "
+                       "FROM exploitability_reviews r LEFT JOIN vuln_findings v ON v.id = r.vuln_id"
+                       f"{where} ORDER BY r.created_at DESC", params)
+        chains = db.q(self.conn,
+                      "SELECT * FROM attack_chains ORDER BY CASE status WHEN 'validated' THEN 0 "
+                      "WHEN 'draft' THEN 1 ELSE 2 END, id DESC")
+
+        ready = [r for r in reviews if r["triage_ready"]]
+        rejected = [r for r in reviews if r["verdict"] in ("theoretical", "needs_evidence")]
+        not_exploitable = [r for r in reviews if r["verdict"] == "not_exploitable"]
+
+        body = _kv_table("Engagement summary", {
+            "Reviews recorded": len(reviews),
+            "Triage-ready (submittable)": len(ready),
+            "Rejected as theoretical / unproven": len(rejected),
+            "Proven not exploitable": len(not_exploitable),
+            "Attack chains": len(chains),
+            "Chains validated": len([c for c in chains if c["status"] == "validated"]),
+        })
+
+        if ready:
+            rows = "".join(
+                f"<tr><td>{_esc(r['vuln_id'])}</td><td>{_esc(r['finding_title'] or '—')}</td>"
+                f"<td>{_esc(r['target'])}</td><td>{_badge(r['finding_severity'])}</td>"
+                f"<td>{_esc(r['impact_before'] or '—')} &rarr; {_esc(r['impact_after'] or '—')}</td>"
+                f"<td>{_esc(r['trust_boundary'] or '—')}</td></tr>" for r in ready)
+            body += (f"<h2>Findings ready for submission</h2><table><tr><th>Finding</th><th>Title</th>"
+                     f"<th>Target</th><th>Severity</th><th>Impact</th><th>Boundary crossed</th></tr>"
+                     f"{rows}</table>")
+        else:
+            body += ("<h2>Findings ready for submission</h2>"
+                     "<p>None — no review has met the evidence standard (in-scope target, "
+                     "evidence, reproduction, impact).</p>")
+
+        if chains:
+            parts = []
+            for c in chains:
+                steps = db.jload(c.get("steps"), []) or []
+                step_html = "".join(
+                    f"<li>{_esc(s.get('action'))} <em>[{_esc(s.get('impact'))}]</em></li>" for s in steps)
+                note = (f"<p><em>Why it compounds:</em> {_esc(c['escalation_note'])}</p>"
+                        if c.get("escalation_note") else "")
+                parts.append(
+                    f"<h3>{_esc(c['title'])} <small>({_esc(c['status'])}, "
+                    f"combined impact {_esc(c['combined_impact'])})</small></h3>"
+                    f"<p><em>Entry point:</em> {_esc(c['entry_point'])}"
+                    f"{' &middot; <em>Boundary:</em> ' + _esc(c['trust_boundary']) if c.get('trust_boundary') else ''}</p>"
+                    f"<ol>{step_html}</ol>{note}")
+            body += "<h2>Attack chains</h2>" + "".join(parts)
+
+        if rejected or not_exploitable:
+            rows = "".join(
+                f"<tr><td>{_esc(r['vuln_id'])}</td><td>{_esc(r['finding_title'] or '—')}</td>"
+                f"<td>{_esc(r['verdict'])}</td><td>{_esc(r['rationale'])}</td></tr>"
+                for r in rejected + not_exploitable)
+            body += (f"<h2>Rejected &amp; disproven (recorded so they are not re-tested)</h2>"
+                     f"<table><tr><th>Finding</th><th>Title</th><th>Verdict</th><th>Why</th></tr>"
+                     f"{rows}</table>")
+
+        title = "Tradecraft engagement report" + (f" ({verdict})" if verdict else "")
+        return self._write("tradecraft", title, actor, filters, body)
 
     def _overview(self, actor, filters):
         by_sev = db.q(self.conn, "SELECT severity, COUNT(*) c FROM alerts GROUP BY severity")

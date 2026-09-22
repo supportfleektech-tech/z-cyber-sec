@@ -29,3 +29,12 @@ all sit below the adapter. Unknown persona names are refused at creation.
 Consequential tradecraft tools (`record_exploitability_review`,
 `propose_attack_chain`) require human approval exactly like `create_case`,
 and both go through the same validators the API uses.
+## Tool arguments: prose vs. identifiers (SEC-076)
+
+`policy.validate_args(args, tool)` applies the shell-construct heuristic to
+every field **except** the ones a tool declares as `text_fields` — free text
+that is stored as data and never interpreted (reproduction steps, rationale,
+evidence). Declared prose is length-capped instead (8000 chars/entry, 50
+entries) so skipping the heuristic does not skip bounding. The declaration is
+per-tool: identical arguments are still refused for a tool that did not
+declare them.

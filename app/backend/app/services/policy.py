@@ -21,23 +21,65 @@ _SHELLISH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Caps for declared free-text argument fields (SEC-076): the heuristic is
+# skipped for these, so they need a bound of their own.
+_TEXT_FIELD_LIMITS = {"max_chars": 8000, "max_items": 50}
+
 
 def _actor_from_agent(agent: dict) -> dict:
     return {"type": "agent", "id": str(agent["id"]), "name": agent["name"]}
 
 
-def validate_args(args: dict) -> str | None:
-    """Return a denial reason if args look like shell injection; else None."""
-    def walk(v):
+def validate_args(args: dict, tool: str | None = None) -> str | None:
+    """Return a denial reason if args look like shell injection; else None.
+
+    Scope matters (SEC-076). The shell-construct heuristic exists to stop
+    injection reaching some *other* tool's semantics — nothing here executes
+    anything. Applied to every field it produced false positives that broke the
+    product's own workflow: a reproduction step reading "run
+    ``curl -s http://target/api``" is normal pentest prose, not an attack, and
+    a tool that refuses to record it is unusable for the thing it is for.
+
+    So tools may declare ``text_fields``: free text that is stored as data and
+    never interpreted (reproduction steps, rationale, evidence, notes). Those
+    are length-capped here and skipped by the shell heuristic; every other
+    field keeps the strict check exactly as before.
+    """
+    prose = set((TOOL_REGISTRY.get(tool or "", {}) or {}).get("text_fields") or ())
+    limits = _TEXT_FIELD_LIMITS
+
+    def check_text(value, name: str) -> str | None:
+        items = value if isinstance(value, list) else [value]
+        if len(items) > limits["max_items"]:
+            return f"{name}: too many entries (max {limits['max_items']})"
+        for item in items:
+            if not isinstance(item, str):
+                return f"{name}: entries must be strings"
+            if len(item) > limits["max_chars"]:
+                return f"{name}: entry exceeds {limits['max_chars']} characters"
+        return None
+
+    def walk(v, name: str = ""):
+        if name in prose:
+            return check_text(v, name)
         if isinstance(v, str) and _SHELLISH_RE.search(v):
-            return True
+            return "shell-like construct in untrusted input (possible injection)"
         if isinstance(v, dict):
-            return any(walk(x) for x in v.values())
+            for k, x in v.items():
+                err = walk(x, str(k))
+                if err:
+                    return err
         if isinstance(v, list):
-            return any(walk(x) for x in v)
-        return False
-    if walk(args or {}):
-        return "args rejected: shell-like construct in untrusted input (possible injection)"
+            for x in v:
+                err = walk(x, name)
+                if err:
+                    return err
+        return None
+
+    err = walk(args or {})
+    if err:
+        prefix = "args rejected: "
+        return err if err.startswith(prefix) else prefix + err
     return None
 
 
@@ -269,9 +311,12 @@ TOOL_REGISTRY: dict[str, dict] = {
                     "description": "Read one finding with its exploitability reviews and chains."},
     "record_exploitability_review": {
         "fn": _record_exploitability_review, "read_only": False,
+        "text_fields": ("rationale", "reproduction", "evidence", "preconditions",
+                        "impact_before", "impact_after"),
         "description": "Record an exploitability verdict with evidence. REQUIRES APPROVAL."},
     "propose_attack_chain": {
         "fn": _propose_attack_chain, "read_only": False,
+        "text_fields": ("rationale", "escalation_note", "title", "steps"),
         "description": "Propose a multi-step attack chain. REQUIRES APPROVAL."},
 }
 
@@ -312,7 +357,7 @@ def plan_task(conn, agent: dict, request: dict, requester: dict) -> dict:
             reasons.append(f"tool not in agent allowlist: {tool}")
             _record_call(conn, None, tool, args, False, "not in agent allowlist")
             continue
-        inj = validate_args(args)
+        inj = validate_args(args, tool)
         if inj:
             reasons.append(inj)
             _record_call(conn, None, tool, args, False, inj)
@@ -353,7 +398,7 @@ def execute_task(conn, task: dict, agent: dict) -> dict:
             errors.append(f"unknown tool {tool}")
             _record_call(conn, task["id"], tool, args, False, "tool not in registry at execution")
             continue
-        inj = validate_args(args)
+        inj = validate_args(args, tool)
         if inj:
             errors.append(inj)
             _record_call(conn, task["id"], tool, args, False, inj)

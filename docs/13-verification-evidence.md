@@ -366,6 +366,52 @@ Suite: **191 passed** (145 + 46 new in `tests/test_tradecraft.py`), ruff clean;
 frontend typecheck + build green (288.15 kB / 80.33 kB gzip). Docs: `docs/16`
 (new), `docs/12` (endpoints), `docs/06` (personas), README index.
 
+## SEC-076 tradecraft follow-ups — Verified, 2026-09-22
+
+Three items found by **using** SEC-075 rather than shipping it. The first is a
+defect that broke the feature's own workflow.
+
+**Defect: the injection heuristic rejected legitimate engagement prose.**
+`policy.validate_args` applied `_SHELLISH_RE` to every argument field, so an
+agent recording a reproduction step reading "run
+``curl -s http://target/api``" was refused as "possible injection". A pentest
+tool that cannot record a command line is broken for the thing it is for. The
+filter was also inconsistent (`"id; whoami"` passed, `"id;whoami"` did not),
+because the pattern requires a letter straight after the semicolon.
+
+Fix: tools declare `text_fields` (prose stored as data, never interpreted).
+The heuristic is skipped for exactly those fields; they are length-capped
+instead (8000 chars/entry, 50 entries/field), and every other field keeps the
+strict check unchanged. Verified that the relaxation is **per-tool**, not
+global: the same args are still refused for `propose_attack_chain` (which does
+not declare `reproduction`), for `create_case`, and for the no-tool default;
+injection in an identifier field (`target: "$(rm -rf /)"`) is still refused.
+
+**Gap: no deliverable.** `POST /api/reports {kind: "tradecraft"}` now renders
+the engagement report — summary, findings ready for submission, chains as
+paths, and the rejected/disproven list. Live: report id 1, 349 input rows,
+sha256 recorded, `Engagement summary / Findings ready for submission / Attack
+chains / Rejected` all present in the HTML; empty-state renders "None — no
+review has met the evidence standard".
+
+**Gap: not discoverable.** The seed now ships `the-xploiter` (adapter
+`openai_compat`, local Ollama endpoint, `persona: the-xploiter`, the four
+tradecraft tools) so a fresh install exposes the persona; a test asserts the
+shipped example contains no execution primitive.
+
+**Full agent path verified live** (not just planned): a read-only task
+auto-executed (`list_scope_targets` returned the authorized targets, allowed
+only because exercise 1 is `authorized`); a consequential task returned
+`awaiting_approval` — proving the prose fix did not weaken the gate — and after
+`POST /approvals/1/decide {decision: "approve", comment: …}` the task executed
+and wrote review id 3 with `reviewed_by: agent`, verdict `exploitable`, and the
+backticks **preserved intact** in the stored reproduction text. The approval
+vocabulary is `approve`/`reject` (`bad_decision` on anything else).
+
+Suite: **212 passed** (191 + 21 new in `tests/test_hardening_followups.py`),
+ruff clean; frontend typecheck + build green (289.40 kB / 80.68 kB gzip).
+Duplicate clusters now have a UI panel on `/tradecraft`.
+
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
   live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency

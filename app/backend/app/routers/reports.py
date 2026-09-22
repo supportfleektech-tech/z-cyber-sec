@@ -16,7 +16,7 @@ from ..services.report import ReportBuilder
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
-KINDS = ["overview", "soc", "cases", "intel", "vulns"]
+KINDS = ["overview", "soc", "cases", "intel", "vulns", "tradecraft"]
 
 
 class ReportIn(BaseModel):

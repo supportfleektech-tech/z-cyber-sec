@@ -140,7 +140,7 @@ plan and executes nothing**; real runs execute allowlisted steps via the
 agent gateway.
 
 ### Reports (`/api/reports`)
-`POST /` — generate (`{kind: overview|soc|cases|intel|vulns, title?, filters?}`
+`POST /` — generate (`{kind: overview|soc|cases|intel|vulns|tradecraft, title?, filters?}`
 → report row with `input_rows` + `input_sha256` provenance) ·
 `GET /` (kind filter) · `GET /{id}/download` (requires
 `reports.generate`; audited).

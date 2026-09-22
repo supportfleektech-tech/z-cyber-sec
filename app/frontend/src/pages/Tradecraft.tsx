@@ -56,6 +56,11 @@ interface Chain {
   created_at: string;
 }
 interface Paged<T> { items: T[]; total: number }
+interface DuplicateCluster {
+  dedupe_key: string;
+  count: number;
+  reviews: { id: number; vuln_id: number | null; target: string | null; verdict: string; triage_ready: number; created_at: string }[];
+}
 interface Stats {
   reviews: number;
   reviews_triage_ready: number;
@@ -80,6 +85,8 @@ export default function Tradecraft() {
   const stats = useApi<Stats>(() => api.get<Stats>("/api/tradecraft/stats"), []);
   const reviews = useApi<Paged<Review>>(() => api.get<Paged<Review>>("/api/tradecraft/reviews?limit=50"), []);
   const chains = useApi<Paged<Chain>>(() => api.get<Paged<Chain>>("/api/tradecraft/chains"), []);
+  const dupes = useApi<{ clusters: DuplicateCluster[] }>(
+    () => api.get<{ clusters: DuplicateCluster[] }>("/api/tradecraft/duplicates"), []);
   const [report, setReport] = useState<{ vuln_id: number; markdown: string; reportable: boolean } | null>(null);
 
   const reloadAll = () => { reviews.reload(); chains.reload(); stats.reload(); scope.reload(); };
@@ -260,6 +267,52 @@ export default function Tradecraft() {
           </LoadBlock>
           <ChainForm onDone={(msg) => { flashShow(msg); reloadAll(); }} />
         </div>
+      </div>
+
+      <div className="panel">
+        <h2>
+          Engagement deliverable
+          <button className="btn ghost sm" style={{ float: "right" }} onClick={() =>
+            api.post<{ id: number }>("/api/reports", { kind: "tradecraft", filters: {} })
+              .then((d) => { flashShow(`Report #${d.id} generated`); window.location.hash = `#/reports`; })
+              .catch((e) => flashShow(String(e.message || e)))}>
+            generate report
+          </button>
+        </h2>
+        <div className="faint">
+          Renders the engagement deliverable: findings that met the evidence standard, attack
+          chains as paths, and the rejected/disproven verdicts (so the record shows what was
+          ruled out, not only what was reported). Every generated file is hashed and audited.
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2>Duplicate clusters</h2>
+        <LoadBlock loading={dupes.loading} error={dupes.error}>
+          {dupes.data && dupes.data.clusters.length === 0 ? (
+            <div className="faint">
+              No duplicate submissions — every recorded review has a distinct
+              target/weakness fingerprint. Identical submissions cluster here instead of
+              being reviewed twice (bug bounty signal-to-noise).
+            </div>
+          ) : (
+            <table className="tbl">
+              <thead><tr><th>Fingerprint</th><th>Submissions</th><th>Targets</th><th>Verdicts</th></tr></thead>
+              <tbody>
+                {dupes.data?.clusters.map((c) => (
+                  <tr key={c.dedupe_key}>
+                    <td className="mono dim">{c.dedupe_key}</td>
+                    <td>{c.count}</td>
+                    <td className="mono">{[...new Set(c.reviews.map((r) => r.target || "—"))].join(", ")}</td>
+                    <td>{[...new Set(c.reviews.map((r) => r.verdict))].map((v) => (
+                      <span key={v} className={`st ${VERDICT_TONE[v] || ""}`}>{v}</span>
+                    ))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </LoadBlock>
       </div>
 
       {report && (
