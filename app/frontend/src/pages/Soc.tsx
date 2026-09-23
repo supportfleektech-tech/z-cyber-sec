@@ -75,6 +75,7 @@ export default function Soc() {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [sel, setSel] = useState<Alert | null>(null);
+  const [note, setNote] = useState("");
   const [flash, flashShow] = useFlash();
 
   const alerts = useApi<Paged<Alert>>(
@@ -90,6 +91,7 @@ export default function Soc() {
   const patchAlert = async (a: Alert, body: Record<string, unknown>) => {
     await api.patch(`/api/soc/alerts/${a.id}`, body);
     setSel(null);
+    setNote("");
     alerts.reload();
   };
 
@@ -225,11 +227,22 @@ export default function Soc() {
           </div>
           <AlertEvents alertId={sel.id} />
           <div className="row mt">
+            <label className="f" style={{ margin: 0 }}>Disposition note</label>
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="why — required when dismissing as a false positive"
+              style={{ flex: 1, minWidth: 220 }}
+            />
+          </div>
+          <div className="row" style={{ marginTop: 6 }}>
             <label className="f" style={{ margin: 0 }}>Triage status</label>
             <select
               defaultValue={sel.status}
               onChange={async (e) => {
-                await patchAlert(sel, { status: e.target.value });
+                const body: Record<string, unknown> = { status: e.target.value };
+                if (note.trim()) body.notes = note.trim();
+                await patchAlert(sel, body);
                 flashShow(`Alert ${sel.id} → ${e.target.value}`);
               }}
             >

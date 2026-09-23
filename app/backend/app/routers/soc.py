@@ -244,6 +244,16 @@ def update_alert(alert_id: int, body: AlertUpdate, conn: sqlite3.Connection = De
         raise HTTPException(404, {"code": "not_found"})
     if body.status is not None and body.status not in ALERT_STATUSES:
         raise HTTPException(400, {"code": "bad_status"})
+    # SEC-081: dismissing an alert is a false-positive judgement, and it is the
+    # highest-volume analyst call in a SOC. Everywhere else on this platform a
+    # judgement records its reason (chain status needs a rationale, a release
+    # needs its checklist, a verdict needs its mechanism); an alert dismissal
+    # previously wrote nothing at all, so "why was this critical alert closed
+    # without action?" had no answer. Require the reason.
+    if body.status == "dismissed" and not (body.notes or "").strip():
+        raise HTTPException(400, {"code": "note_required",
+                                  "message": "dismissing an alert records a false-positive "
+                                             "judgement — add a note saying why"})
     fields, params = [], []
     if body.status is not None:
         fields.append("status = ?")

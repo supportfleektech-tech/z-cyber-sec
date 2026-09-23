@@ -614,7 +614,40 @@ Verified live: `{"title":"x"}` → `422 invalid_request` with
 
 Suite 234 → **235 passed**, ruff clean.
 
-Suite: **235 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-081 — a critical alert could be dismissed with no reason recorded
+
+**Defect found while verifying SEC-080's live behaviour.** Dismissing an alert as
+a false positive — the highest-volume judgement call in a SOC — recorded
+*nothing*:
+
+```
+PATCH /api/soc/alerts/4 {"status":"dismissed"}   -> 200
+{"id":4, ..., "severity":"critical", "status":"dismissed", "notes":null, "case_id":null}
+```
+
+A critical-severity alert ("Potential Data Exfiltration") was closed without
+action and the audit trail carried the status change but no reason. The rest of
+the platform does not work this way: a chain status change requires a rationale,
+a release requires its checklist and approval, an exploitability verdict
+requires a mechanism. "Why was this alert closed without action?" — the first
+question any audit or handover asks — had no answer.
+
+Fixed: `PATCH /soc/alerts/{id}` refuses `dismissed` without a non-blank note
+(`400 note_required`), the note is stored on the alert and included in the
+`alert.updated` audit detail, and the triage panel gained a **Disposition note**
+field so the reason is captured at the moment of the decision rather than
+discovered by the API rejection. Other statuses (`triaging`, `confirmed`,
+`closed`) are unchanged — the rule is about terminal false-positive calls, not
+about adding friction to triage.
+
+Verified live: `{"status":"dismissed"}` → `400 note_required` with the alert
+unchanged; `{"status":"dismissed","notes":"   "}` → `400` (whitespace is not a
+reason); with a real note → `200 dismissed` and the note present on the row and
+in the audit detail.
+
+Suite 235 → **236 passed**, ruff clean, frontend green (291.02 kB / 81.20 kB).
+
+Suite: **236 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.

@@ -62,7 +62,7 @@ Targeted writes are scope-checked against exercises in status
 | `GET /events` | Event search (field filters, paging) |
 | `GET /rules` | Rules + **compile health**: each item carries `compiles` and `error`; the response carries `summary{ok, broken, broken_uids}`. `compiles:false` means the rule is stored but **inert** — detection never fires it (SEC-074; see docs/15) |
 | `GET /rules/coverage` | Coverage over runnable rules; adds `inert_rules` + `broken_rules` (kept out of `gaps`, which lists only rules that *can* fire but have not) |
-| `GET /alerts` · `GET /alerts/{id}` · `PATCH /alerts/{id}` | Alert triage & lifecycle |
+| `GET /alerts` · `GET /alerts/{id}` · `PATCH /alerts/{id}` | Alert triage & lifecycle. Moving an alert to `dismissed` **requires a note** — a false-positive call is a judgement and the reason is recorded with it (SEC-081; missing/blank → `400 note_required`) |
 | `GET/POST /rules` · `PATCH /rules/{id}` | Detection rule CRUD (Sigma-subset) |
 | `POST /rules/dry-run` | Evaluate a rule draft against stored events |
 | `POST /detections/backfill` | Re-evaluate stored events after rule changes |

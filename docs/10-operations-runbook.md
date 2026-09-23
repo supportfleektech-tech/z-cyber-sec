@@ -5,7 +5,9 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
 
 ## Daily
 - Health: `GET /api/healthz` (200) + `GET /metrics`; disk headroom on the
-  data volume; alert pipeline (`/api/soc/alerts?status=new`).
+  data volume; alert pipeline (`/api/soc/alerts?status=new`). Dismissals carry a
+  note by design (SEC-081) — when reviewing the queue, `notes` is where the
+  false-positive reasoning lives, so a dismissal without one cannot happen.
   - Metrics are internal-only: scrape `http://127.0.0.1:8080/metrics` on the
     host (the public edge answers `403` by design). If `METRICS_TOKEN` is
     set, add `-H "Authorization: Bearer $METRICS_TOKEN"`.

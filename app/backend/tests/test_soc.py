@@ -1,6 +1,8 @@
 """SOC: ingest validation, idempotency, alerts, rules (SEC-030/031/032)."""
 from __future__ import annotations
 
+from app import db
+
 
 def _ingest(client, ts, action="login_success", **kw):
     ev = {"ts": ts, "host": "h1", "action": action, "outcome": "success",
@@ -108,3 +110,31 @@ def test_new_rule_detected_via_backfill(client, seeded, conn):
     assert r.status_code == 201
     out = client.post("/api/soc/detections/backfill").json()
     assert any(a["title"].startswith("Exfil v2") for a in out["alerts"])
+
+
+def test_dismissing_an_alert_requires_a_reason(client, seeded, conn):
+    """SEC-081: a false-positive call is a judgement, and judgements record
+    their reason — dismissing used to write nothing at all."""
+    client.post("/api/auth/login", json={"username": "sasha", "password": "SashaSocPass1!"})
+    r = client.patch("/api/soc/alerts/2", json={"status": "dismissed"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "note_required"
+    assert db.one(conn, "SELECT status FROM alerts WHERE id=2")["status"] == "new"   # unchanged
+
+    r = client.patch("/api/soc/alerts/2", json={"status": "dismissed", "notes": "   "})
+    assert r.status_code == 400                                                       # whitespace is not a reason
+
+    r = client.patch("/api/soc/alerts/2",
+                     json={"status": "dismissed", "notes": "synthetic drill traffic from the lab range"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "dismissed"
+    assert "synthetic drill" in body["notes"]
+    # the reason is in the audit trail, not only on the row
+    ev = db.one(conn, "SELECT detail FROM audit_events WHERE action='alert.updated'"
+                      " AND target_id='2' ORDER BY id DESC LIMIT 1")
+    assert "synthetic drill" in ev["detail"]
+
+    # other statuses still need no note
+    r = client.patch("/api/soc/alerts/3", json={"status": "triaging"})
+    assert r.status_code == 200
