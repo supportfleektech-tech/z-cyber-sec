@@ -153,18 +153,32 @@ def update_case(case_id: int, body: CaseUpdate, conn: sqlite3.Connection = Depen
     params.append(db.utcnow())
     params.append(case_id)
     conn.execute(f"UPDATE cases SET {', '.join(fields)} WHERE id = ?", params)
-    if body.status == "closed":
-        conn.execute("UPDATE cases SET closed_at = ? WHERE id = ?", (db.utcnow(), case_id))
     now = db.utcnow()
+    # SEC-092: `closed_at` was set when a case closed and never cleared, so a
+    # reopened case still reported a closure time — the case report (an evidence
+    # artefact) and the SPA's "created → closed" line presented an active case as
+    # closed. It is now cleared on the way out of `closed`, and re-closing keeps
+    # the original timestamp instead of quietly rewriting it.
+    reopened = body.status is not None and body.status != "closed" and c["status"] == "closed"
+    if body.status == "closed" and (c["status"] != "closed" or not c["closed_at"]):
+        conn.execute("UPDATE cases SET closed_at = ? WHERE id = ?", (now, case_id))
+    elif reopened:
+        conn.execute("UPDATE cases SET closed_at = NULL WHERE id = ?", (case_id,))
     if body.status:
         conn.execute("INSERT INTO case_timeline (case_id, ts, actor, entry_type, message) "
-                     "VALUES (?, ?, ?, 'status', ?)", (case_id, now, user["username"], f"Status → {body.status}"))
+                     "VALUES (?, ?, ?, 'status', ?)",
+                     (case_id, now, user["username"],
+                      f"Status → {body.status}" + (" (reopened from closed)" if reopened else "")))
     if body.notes:
         conn.execute("INSERT INTO case_timeline (case_id, ts, actor, entry_type, message) "
                      "VALUES (?, ?, ?, 'note', ?)", (case_id, now, user["username"], body.notes))
     conn.commit()
+    detail = {k: v for k, v in body.model_dump().items() if v is not None}
+    if body.status is not None and body.status != c["status"]:
+        detail["from_status"], detail["to_status"] = c["status"], body.status
+        detail["reopened"] = reopened
     record_audit(conn, _actor(user), "case.updated", target_type="case", target_id=str(case_id),
-                 detail={k: v for k, v in body.model_dump().items() if v is not None})
+                 detail=detail)
     return db.one(conn, "SELECT * FROM cases WHERE id = ?", (case_id,))
 
 

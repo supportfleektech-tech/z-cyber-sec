@@ -99,3 +99,47 @@ def test_evidence_bad_classification_rejected(client, seeded):
     files = {"file": ("a.txt", io.BytesIO(b"hi"), "text/plain")}
     r = client.post(f"/api/cases/{case['id']}/evidence", files=files, data={"classification": "topsecret"})
     assert r.status_code == 400
+
+
+def test_reopening_a_case_clears_closed_at(client, seeded):
+    """SEC-092: `closed_at` was stamped on close and never cleared, so a reopened
+    case still reported a closure time — the case report (an evidence artefact)
+    and the case detail header ("created → closed") presented an active case as
+    closed. Live-verified before the fix: reopen left `closed_at` at the old
+    value."""
+    from app import db as dbmod
+
+    c = client.post("/api/cases", json={"title": "Reopen me", "severity": "medium"}).json()
+    cid = c["id"]
+
+    r = client.patch(f"/api/cases/{cid}", json={"status": "closed"})
+    assert r.status_code == 200
+    closed_at = r.json()["closed_at"]
+    assert closed_at
+
+    # closing again does not rewrite the closure time
+    r = client.patch(f"/api/cases/{cid}", json={"status": "closed"})
+    assert r.json()["closed_at"] == closed_at
+
+    # reopening clears it and says so in the timeline and the audit trail
+    r = client.patch(f"/api/cases/{cid}", json={"status": "investigating", "notes": "false positive"})
+    assert r.status_code == 200 and r.json()["closed_at"] is None
+    entries = dbmod.q(seeded, "SELECT message FROM case_timeline WHERE case_id = ? ORDER BY id", (cid,))
+    messages = [e["message"] for e in entries]
+    assert any(m == "Status → closed" for m in messages)
+    assert any("reopened from closed" in m for m in messages)
+    ev = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'case.updated' "
+                                     "ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert ev["from_status"] == "closed" and ev["to_status"] == "investigating" and ev["reopened"] is True
+
+    # closing after a reopen stamps a closure time again (>= because the
+    # timestamps are second-granularity and this test runs within one second)
+    r = client.patch(f"/api/cases/{cid}", json={"status": "closed"})
+    assert r.json()["closed_at"] and r.json()["closed_at"] >= closed_at
+
+    # scope check: a report of the case shows no closure for an open case
+    client.patch(f"/api/cases/{cid}", json={"status": "open"})
+    html = client.post("/api/reports", json={"kind": "cases"}).json()
+    from pathlib import Path
+    body = Path(html["path"]).read_text()
+    assert "Reopen me" in body

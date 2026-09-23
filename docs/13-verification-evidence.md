@@ -835,10 +835,13 @@ run note, agent rename), ruff clean.
 Suite 263 → **265 passed** (2 new: the JSON-as-text sweep over every GET route,
 and the SPA `fmtJson` rendering guard), ruff clean.
 
-**Current totals:** **265 tests pass** (`pytest -q`, ~4 min), ruff clean,
+Suite 265 → **267 passed** (2 new: case reopen clears `closed_at`, finding reopen
+clears `fixed_at`), ruff clean.
+
+**Current totals:** **267 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (292.27 kB / 81.50 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-091 series was reproduced first (as a failing check or a live request) and
+SEC-092 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1057,3 +1060,25 @@ real payloads, `mitigations?.join("; ")` renders
 **Regression guard:** `test_no_get_route_returns_json_as_text` does the same walk
 inside the suite (>40 routes asserted); verified non-vacuous by removing one
 decode and watching it fail with the original payload.
+
+### SEC-092 — reopen left the closure timestamps set (fixed)
+
+**Was:** `cases.closed_at` was stamped when a case closed and never cleared, so a
+reopened case still reported a closure time; `vuln_findings.fixed_at` had the same
+defect, and both were *rewritten* if the same terminal status was sent twice.
+
+**Live-verified before the fix:** close → `closed_at: 2026-09-23T02:54:55Z`,
+reopen to `investigating` → `{"status": "investigating", "closed_at":
+"2026-09-23T02:54:55Z"}`. Consumers: the case report prints `created_at` and
+`closed_at` side by side (`services/report.py`), and the SPA's case header renders
+`created → closed` (`Incidents.tsx`) — both presented an active case as closed.
+
+**Fixed:** the timestamp is cleared on the way out of the state and kept on a
+repeat transition, with the reopen made visible in the case timeline
+(`Status → investigating (reopened from closed)`) and in the audit detail
+(`{from_status, to_status, reopened}`); findings carry `from_status`/`to_status`
+too.
+
+**Live (after fix):** close → `closed_at` set; reopen → `closed_at: null` with the
+timeline and audit entries above; a finding returns `fixed_at: null` after
+reopening.

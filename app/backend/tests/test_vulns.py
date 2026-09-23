@@ -124,3 +124,28 @@ def test_finding_severity_is_validated(client, seeded, conn):
     assert body["created"] == 1 and body["errors"] == 1
     assert "bad_severity" in body["error_sample"][0]
     assert db.one(conn, "SELECT severity FROM vuln_findings WHERE title='Bad row'") is None
+
+
+def test_reopening_a_finding_clears_fixed_at(client, seeded):
+    """SEC-092: `fixed_at` was stamped on `fixed` and left set when the finding
+    was reopened (and rewritten by a repeat `fixed`), so "when was this fixed?"
+    had no reliable answer."""
+    from app import db as dbmod
+
+    fid = client.post("/api/vulns", json={"title": "Reopen me too", "severity": "high"}).json()["id"]
+    r = client.patch(f"/api/vulns/{fid}", json={"status": "fixed"})
+    assert r.status_code == 200
+    fixed_at = r.json()["fixed_at"]
+    assert fixed_at
+
+    r = client.patch(f"/api/vulns/{fid}", json={"status": "fixed"})
+    assert r.json()["fixed_at"] == fixed_at          # not rewritten
+
+    r = client.patch(f"/api/vulns/{fid}", json={"status": "in_progress"})
+    assert r.status_code == 200 and r.json()["fixed_at"] is None
+    ev = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'vuln.updated' "
+                                     "ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert ev["from_status"] == "fixed" and ev["to_status"] == "in_progress"
+
+    r = client.patch(f"/api/vulns/{fid}", json={"status": "fixed"})
+    assert r.json()["fixed_at"] and r.json()["fixed_at"] >= fixed_at   # second-granularity

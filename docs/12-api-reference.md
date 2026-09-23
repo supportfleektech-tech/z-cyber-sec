@@ -237,6 +237,23 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## State timestamps
+
+A timestamp that records *when* a state was entered is cleared when the state is
+left, and is not rewritten by a repeat of the same transition (SEC-092):
+
+- `cases.closed_at` — set on `status: closed`, cleared when the case is reopened
+  (`PATCH` returns `closed_at: null`), and kept if `closed` is sent again. The
+  reopen is recorded in `case_timeline` as
+  `Status → investigating (reopened from closed)` and in the audit detail as
+  `{from_status, to_status, reopened}`.
+- `vuln_findings.fixed_at` — set on `status: fixed`, cleared when the finding is
+  reopened, kept when `fixed` is repeated.
+
+Before this, a reopened case still carried its closure time, so the case report
+(an evidence artefact) and the case-detail header displayed an active case as
+closed.
+
 ## JSON fields
 
 JSON columns (lists, dicts) are stored as text in SQLite and **returned as JSON**:

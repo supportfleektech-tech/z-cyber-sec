@@ -193,16 +193,24 @@ def update_finding(fid: int, body: FindingUpdate, conn: sqlite3.Connection = Dep
         if getattr(body, k) is not None:
             fields.append(f"{k} = ?")
             params.append(getattr(body, k))
-    if body.status == "fixed":
+    # SEC-092: same defect as `cases.closed_at` — `fixed_at` was stamped when a
+    # finding became `fixed` and left set when it was reopened (and rewritten by
+    # a repeat `fixed`), so "when was this fixed?" had no reliable answer.
+    if body.status == "fixed" and (f["status"] != "fixed" or not f["fixed_at"]):
         fields.append("fixed_at = ?")
         params.append(db.utcnow())
+    elif body.status is not None and body.status != "fixed" and f["status"] == "fixed":
+        fields.append("fixed_at = NULL")
     if not fields:
         raise HTTPException(400, {"code": "no_changes"})
     params.append(fid)
     conn.execute(f"UPDATE vuln_findings SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
+    detail = {k: v for k, v in body.model_dump().items() if v is not None}
+    if body.status is not None and body.status != f["status"]:
+        detail["from_status"], detail["to_status"] = f["status"], body.status
     record_audit(conn, _actor(user), "vuln.updated", target_type="vuln_finding", target_id=str(fid),
-                 detail={k: v for k, v in body.model_dump().items() if v is not None})
+                 detail=detail)
     return db.one(conn, "SELECT * FROM vuln_findings WHERE id = ?", (fid,))
 
 
