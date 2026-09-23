@@ -37,6 +37,19 @@ def test_error_responses_do_not_leak(client, seeded):
     r = client.post("/api/soc/events", json={"events": [{"ts": "x"}]})
     assert r.status_code == 422
     assert "Traceback" not in r.text
+
+
+def test_validation_errors_use_the_documented_envelope(client, seeded):
+    """SEC-080: docs/12 promises `detail = {code, message}` for non-2xx; the
+    default FastAPI 422 body is a bare list, which a client written against
+    that contract renders as `undefined`."""
+    r = client.post("/api/cases", json={"title": "x"})
+    assert r.status_code == 422
+    d = r.json()["detail"]
+    assert d["code"] == "invalid_request"
+    assert "title" in d["message"]                       # names the offending field
+    assert d["errors"][0]["field"] == "title"
+    assert "Traceback" not in r.text and "app/routers" not in r.text
     # 403 shape
     r = client.post("/api/cases", json={"title": "x" * 200 + "y", "priority": "low"})
     # over-long title -> 422 validation

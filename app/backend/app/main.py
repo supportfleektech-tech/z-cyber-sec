@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,6 +61,27 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        # SEC-080: docs/12 promises every non-2xx body carries
+        # `detail = {code, message}` with stable codes, and the SPA renders that
+        # shape. FastAPI's default 422 body is a bare list, so a client written
+        # against the documented contract read `detail.message` as undefined.
+        # Keep 422 (the status is right) but wrap it: the field-level detail is
+        # preserved under `errors`, and `message` is human-readable.
+        items = []
+        for e in exc.errors():
+            loc = ".".join(str(x) for x in e.get("loc", ()) if x not in ("body", "query", "path"))
+            items.append({"field": loc or "(body)", "msg": e.get("msg", "invalid"),
+                          "type": e.get("type", "value_error")})
+        summary = "; ".join(f"{i['field']}: {i['msg']}" for i in items[:3])
+        if len(items) > 3:
+            summary += f" (+{len(items) - 3} more)"
+        return JSONResponse(status_code=422,
+                            content={"detail": {"code": "invalid_request",
+                                                "message": summary or "Invalid request.",
+                                                "errors": items}})
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):

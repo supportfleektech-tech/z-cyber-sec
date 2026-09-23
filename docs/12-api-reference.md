@@ -17,9 +17,12 @@ verification evidence.
   Every other endpoint requires a session plus a named permission
   (RBAC). Unauthenticated → `401 {detail:{code:"unauthenticated"}}`;
   missing permission → `403`.
-- **Errors:** non-2xx bodies carry `detail = {code, message}` with stable
+- **Errors:** every non-2xx body carries `detail = {code, message}` with stable
   machine-readable codes (`bad_status`, `not_found`, `bad_kind`,
-  `no_changes`, `missing`, ...). Clients key off `code`.
+  `no_changes`, `missing`, ...). Clients key off `code`. Request-validation
+  failures are `422 invalid_request` and additionally carry
+  `detail.errors[] = {field, msg, type}` — the envelope is uniform, so a client
+  never has to branch on the shape (SEC-080).
 - **Time:** ISO-8601 UTC strings.
 - **List endpoints:** most return `{items, total}` with `page` /
   `page_size` query params; a few domain lists return a flat `{items}`.
@@ -189,6 +192,8 @@ records one. `GET /api/admin/audit/verify` re-walks the chain.
 | `invalid_credentials` | login (deliberately generic) |
 | `not_found` | id-based lookups |
 | `bad_status` / `bad_kind` / `bad_role` | enum validation |
+| `bad_severity` | severity values outside the standard five (SEC-079) |
+| `invalid_request` | request validation (422), with `errors[]` |
 | `no_changes` | PATCH with empty diff |
 | `missing` | report file gone |
 | `confirm_required` | restore without `confirm:"RESTORE"` |

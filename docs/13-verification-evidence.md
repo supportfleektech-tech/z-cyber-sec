@@ -578,7 +578,43 @@ Fixes:
 Suite 224 → **234 passed**, ruff clean, frontend typecheck + build green
 (290.67 kB / 81.08 kB gzip).
 
-Suite: **234 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-080 — the documented error envelope was not the real one
+
+**Defect found by testing a documented claim instead of the code.** docs/12
+states: *"non-2xx bodies carry `detail = {code, message}` … Clients key off
+`code`"*. Application errors do. FastAPI's request-validation failures did not:
+
+```
+POST /api/cases {"title": "x"}  ->  422
+{"detail":[{"type":"string_too_short","loc":["body","title"],"msg":"String should have
+ at least 3 characters","input":"x","ctx":{"min_length":3}}]}
+```
+
+`detail` is a **list**, so a client written against the documented contract reads
+`detail.code` → `undefined` (the SPA already branched on the array shape, which
+is how the inconsistency stayed invisible in the UI while remaining wrong for
+every other consumer).
+
+Fixed in `app/main.py`: a `RequestValidationError` handler keeps the correct
+`422` status and returns the documented envelope, preserving the field-level
+detail:
+
+```json
+{"detail": {"code": "invalid_request",
+            "message": "title: String should have at least 3 characters",
+            "errors": [{"field": "title", "msg": "...", "type": "string_too_short"}]}}
+```
+
+`message` names the first three offending fields (then `(+N more)`), and no
+internals (`Traceback`, module paths, submitted values beyond the field name)
+appear in the response. docs/12 now documents the 422 shape and the new codes.
+
+Verified live: `{"title":"x"}` → `422 invalid_request` with
+`errors[0].field == "title"`; the same request previously returned a bare list.
+
+Suite 234 → **235 passed**, ruff clean.
+
+Suite: **235 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.
