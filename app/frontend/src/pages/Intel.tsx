@@ -9,7 +9,9 @@ interface Indicator {
   confidence: number | null;
   status: string;
   source_name: string | null;
-  mitre_tactics: string | null;
+  mitre_tactics: string[] | null;
+  mitre_techniques: string[] | null;
+  ttl_hours: number | null;
   expires_at: string | null;
 }
 interface Source {
@@ -85,10 +87,10 @@ export default function Intel() {
                       className="small"
                       onChange={async (e) => {
                         try {
+                          // SEC-088: only the field being changed. Sending the
+                          // whole row used to be the only way to keep it, and
+                          // omitting a field silently NULLed it.
                           await api.patch(`/api/intel/indicators/${i.id}`, {
-                            type: i.type,
-                            value: i.value,
-                            confidence: i.confidence ?? undefined,
                             status: e.target.value,
                           });
                           flashShow(`Indicator ${i.value} → ${e.target.value}`);
@@ -102,7 +104,7 @@ export default function Intel() {
                     </select>
                   </td>
                   <td className="dim">{i.source_name || "—"}</td>
-                  <td className="dim">{i.mitre_tactics || "—"}</td>
+                  <td className="dim">{i.mitre_tactics?.length ? i.mitre_tactics.join(", ") : "—"}</td>
                   <td className="dim">{fmtTs(i.expires_at)}</td>
                   <td className="faint">#{i.id}</td>
                 </tr>
@@ -168,6 +170,7 @@ function NewIndicator({ onDone }: { onDone: () => void }) {
   const [value, setValue] = useState("");
   const [confidence, setConfidence] = useState("70");
   const [mitre, setMitre] = useState("");
+  const [ttl, setTtl] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -188,7 +191,11 @@ function NewIndicator({ onDone }: { onDone: () => void }) {
             </div>
             <div>
               <label className="f">MITRE tactics</label>
-              <input value={mitre} onChange={(e) => setMitre(e.target.value)} placeholder="T1041" style={{ width: 120 }} />
+              <input value={mitre} onChange={(e) => setMitre(e.target.value)} placeholder="T1041, T1110" style={{ width: 120 }} />
+            </div>
+            <div>
+              <label className="f">TTL (hours)</label>
+              <input value={ttl} onChange={(e) => setTtl(e.target.value)} placeholder="no expiry" style={{ width: 100 }} />
             </div>
           </div>
           <label className="f">Value</label>
@@ -207,7 +214,10 @@ function NewIndicator({ onDone }: { onDone: () => void }) {
                     type,
                     value,
                     confidence: Number(confidence) || undefined,
-                    mitre_tactics: mitre || undefined,
+                    // SEC-089: the API wants a list; this used to send the raw
+                    // string and every attempt to save tactics got a 422.
+                    mitre_tactics: mitre.split(",").map((t) => t.trim()).filter(Boolean),
+                    ttl_hours: Number(ttl) > 0 ? Number(ttl) : undefined,
                   });
                   setOpen(false);
                   onDone();

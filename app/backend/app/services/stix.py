@@ -7,7 +7,8 @@ Supports the common pattern shapes produced by OpenCTI/MISP/elastic export:
   [file:hashes.'SHA-256' = 'abc...']
   [file:name = 'payload.exe']
   [email-addr:value = 'a@b.c']
-Indicators are deduplicated on (type, value); confidence and source are kept.
+Indicators are deduplicated on (type, value); confidence, source, `valid_from`
+and `valid_until` are kept (the latter becomes the indicator's TTL).
 """
 from __future__ import annotations
 
@@ -52,5 +53,9 @@ def parse_bundle(bundle: dict) -> list[dict]:
             ind["confidence"] = obj.get("confidence")
             ind["name"] = obj.get("name", "")
             ind["valid_from"] = obj.get("valid_from")
+            # SEC-087: STIX's own expiry field. Dropping it meant an imported IOC
+            # with a `valid_until` in the past was stored `active` and matched by
+            # correlation forever.
+            ind["valid_until"] = obj.get("valid_until")
             out.append(ind)
     return out

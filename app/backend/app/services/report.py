@@ -251,6 +251,19 @@ def _count(conn, sql: str) -> int:
     return int(r["c"]) if r else 0
 
 
+def _fmt_list(v) -> str:
+    """Render a JSON-list column as text ("[\"T1041\"]" -> "T1041")."""
+    if not v:
+        return "—"
+    try:
+        parsed = json.loads(v)
+    except (ValueError, TypeError):
+        return str(v)
+    if isinstance(parsed, list):
+        return ", ".join(str(x) for x in parsed) or "—"
+    return str(parsed)
+
+
 def _esc(v) -> str:
     """Escape DB values for safe HTML embedding (reports are static files)."""
     return str(escape(str(v))) if v is not None else "—"
@@ -293,7 +306,8 @@ def _cases_table(title: str, rows: list) -> str:
 def _intel_table(title: str, rows: list) -> str:
     body = "".join(
         f"<tr><td>{_esc(r['type'])}</td><td><code>{_esc(r['value'])}</code></td><td>{_esc(r['confidence'])}</td>"
-        f"<td>{_esc(r['source'])}</td><td>{_esc(r['status'])}</td><td>{_esc(r['mitre_tactics'])}</td></tr>" for r in rows)
+        f"<td>{_esc(r['source'])}</td><td>{_esc(r['status'])}</td>"
+        f"<td>{_esc(_fmt_list(r['mitre_tactics']))}</td></tr>" for r in rows)
     return (f"<h2>{_esc(title)}</h2><table><tr><th>Type</th><th>Value</th><th>Confidence</th>"
             f"<th>Source</th><th>Status</th><th>MITRE tactics</th></tr>{body}</table>")
 

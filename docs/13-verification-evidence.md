@@ -825,10 +825,14 @@ prevented, anchor tracks appends), ruff clean.
 Suite 250 → **253 passed** (3 new: restore path containment, crafted bundle
 refused, corrupt bundle is a clean 409), ruff clean.
 
-**Current totals:** **253 tests pass** (`pytest -q`, ~3 min), ruff clean,
+Suite 253 → **259 passed** (6 new: TTL expiry, audited upsert + revocation,
+create-status validation, STIX validity window, PATCH preservation, MITRE payload
+parity), ruff clean.
+
+**Current totals:** **259 tests pass** (`pytest -q`, ~3 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(291.98 kB / 81.46 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-086 series was reproduced first (as a failing check or a live request) and
+(292.26 kB / 81.49 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-089 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -904,3 +908,69 @@ its message as `str(v.get("bad"))`, which renders as `"None"` for the
 `unreadable bundle: ReadError: not a gzip file` (also for truncated archives and
 manifests without a `files` map), `restore_refused` for defence-in-depth
 refusals, and the app stays healthy. Both cases covered by tests.
+
+### SEC-087 — indicator TTL was inert; the upsert was unaudited (fixed)
+
+**Was:** `threat_indicators.ttl_hours` was accepted, validated (`gt=0`) and
+stored, and the SPA even advertised "confidence, **expiry**, and
+cross-correlation" with an `Expires` column bound to `expires_at` — but nothing
+ever read the field: no expiry path existed anywhere in the codebase, and
+`/indicators/correlate` matched every `status = 'active'` row regardless of age,
+so a stale IOC stayed live forever and the `Expires` column always rendered
+"—". The STIX importer dropped `valid_until` entirely (an IOC that expired in the
+feed arrived `active`). Separately, re-sighting an existing indicator updated
+`confidence`/`last_seen` with **no audit entry**, though docs/12 promises one per
+state change; `POST` also silently ignored `status` (a `revoked` indicator came
+back `active` and was correlated).
+
+**Fixed:** expiry is now lazy but real — `expire_due()` runs on the read paths
+(list, correlate) and before a re-sighting, flips elapsed-TTL rows to `expired`,
+and writes one system-actor `intel.indicators.expired` event (idempotent: only
+rows still `active` are touched, so no repeat entries); `expires_at` is returned
+per indicator; STIX `valid_from`/`valid_until` map onto `first_seen`/`ttl_hours`
+with already-past windows imported `expired` (`expired_on_arrival`); the upsert
+is audited and revives `expired` rows on fresh evidence while never undoing a
+human `revoked`; `status` is validated and honoured on create.
+
+**Live (after fix):** created `ttl_hours=1`, backdated `first_seen` by 2h →
+`status: expired`, `expires_at: 2026-09-23T01:25:58Z`, audit
+`intel.indicators.expired {"count":1,"ids":[7],"reason":"ttl_elapsed"}`.
+
+### SEC-088 — `PATCH` overwrote every field it was not given (fixed)
+
+**Was:** the update route took the create model: `type`/`value` were *required*
+but never written, while every other column was assigned from the body — so an
+omitted field was NULLed. **Live-verified before the fix:** on a seeded indicator,
+`PATCH {"confidence": 10}` took `source_id` from `1` to `None`,
+`mitre_tactics` from `["credential-access"]` to `None`, and erased its notes;
+and the SPA's status dropdown sent exactly such a partial body, so one status
+change destroyed the indicator's provenance. `PATCH {"type": "port"}` returned
+`200` and changed nothing.
+
+**Fixed:** a dedicated `IndicatorUpdateIn` (all optional) writes only
+`model_fields_set`, honours and validates `type`/`value` (with a
+`409 duplicate_indicator` guard so edits cannot break the create-dedupe key),
+refuses an empty body with `400 no_changes`, and audits the changed field names.
+
+**Live (after fix):** the same confidence-only PATCH preserved `source_id: 1`,
+`mitre_tactics: ["credential-access"]` and the notes; a status-only PATCH
+preserved them too; audit `intel.indicator.updated {"changed":["confidence"]}`.
+
+### SEC-089 — the SPA's MITRE field could never be saved (fixed)
+
+**Was:** `POST /api/intel/indicators` takes `mitre_tactics: list[str]`, but the
+SPA sent the raw input string. **Live-verified before the fix:**
+`{"mitre_tactics": "T1041"}` → `422 invalid_request` ("Input should be a valid
+list"), so filling in the MITRE tactics box on "New indicator" always failed;
+the API also returned the column as raw JSON text (`'["T1041"]'`), which is why
+the table rendered that literal. (The other four list-typed payloads in the SPA —
+agent tools, exercise targets, tradecraft evidence, chain steps — were checked
+and already send arrays.)
+
+**Fixed:** the form sends `mitre.split(",")`-derived arrays, the API returns
+parsed lists (`_shape()`), the table joins them, and a source-parity test locks
+the shape. The report generator renders the MITRE cell as text
+(`_fmt_list`) instead of raw JSON.
+
+**Live (after fix):** `{"mitre_tactics": ["T1041","T1110"]}` → `201`, round-trips
+as `["T1041","T1110"]`; a bare string still returns the documented 422 envelope.

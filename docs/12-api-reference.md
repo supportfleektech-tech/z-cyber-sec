@@ -92,6 +92,31 @@ they never touch real entities and dedupe against prior runs.
 subset) · `GET /indicators/correlate?window_hours=` (flat hit list) ·
 `GET/POST /sources`.
 
+**Indicator lifecycle (SEC-087/088/089).** `ttl_hours` is enforced: an
+`active` indicator whose TTL has elapsed becomes `expired` on the next read of
+`/indicators`, `/indicators/correlate` or a re-sighting POST, recorded once as a
+system-actor `intel.indicators.expired` audit event (`{count, ids, reason}`) —
+lazy rather than a background job, so it cannot drift from the data. `expires_at`
+is returned on every listed indicator (`null` = never expires).
+
+- `POST /indicators` honours and validates `status`; a re-sighting (same
+  `type`+`value`) refreshes `confidence`/`last_seen`, is audited
+  (`intel.indicator.reseen`), and revives an `expired` indicator — but never
+  undoes a human `revoked`, which is a retraction.
+- `PATCH /indicators/{id}` is a **true partial update**: only the fields you send
+  are written, so a status change no longer erases the source, TTL, MITRE
+  mappings and notes. An empty body is `400 no_changes`; `type`/`value` are
+  editable (validated against `IND_TYPES`, and refused with `409
+  duplicate_indicator` if they would collide with an existing pair); an explicit
+  `null` still clears a field.
+- `mitre_tactics`/`mitre_techniques` are lists in and lists out (they used to be
+  returned as raw JSON text).
+- `POST /indicators/stix` maps STIX `valid_from`/`valid_until` onto
+  `first_seen`/`ttl_hours`; a bundle whose `valid_until` has already passed is
+  imported `expired` rather than `active`, and the count is returned as
+  `expired_on_arrival`. Other STIX fields (`revoked`, granular markings) remain
+  out of subset (ADR-004).
+
 ### Vulnerabilities (`/api/vulns`)
 `GET/POST /` · `PATCH /{fid}` · `GET/POST /{fid}/exceptions` ·
 `GET/POST /{fid}/remediation` · `POST /import/csv` · `POST /import/json`.
@@ -266,3 +291,6 @@ implemented.
 | `bad_path` | restore path is not an existing file inside `data/backups` (SEC-085) |
 | `verify_failed` | bundle failed verification — corrupt/unreadable, manifest missing/broken, unlisted, unsafe or link member, or checksum mismatch (SEC-085/086) |
 | `restore_refused` | defence-in-depth refusal inside `restore_from` (SEC-085) |
+| `bad_status` | indicator status outside `active|expired|revoked` |
+| `duplicate_indicator` | indicator edit would duplicate an existing `type`+`value` |
+| `no_changes` | PATCH with an empty body |
