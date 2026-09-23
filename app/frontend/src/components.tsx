@@ -47,6 +47,14 @@ export function PageHead({ title, sub, actions }: { title: string; sub?: string;
   );
 }
 
+export function fmtJson(v: unknown): string {
+  // SEC-091: JSON fields now arrive as structured values (they used to be
+  // double-encoded text). Rendering an object as a React child throws, so
+  // anything that used to print the raw string goes through here.
+  if (v === null || v === undefined) return "";
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+
 export function SevBadge({ value }: { value: string | null | undefined }) {
   const s = String(value || "info").toLowerCase();
   return <span className={`sev ${s}`}>{s}</span>;

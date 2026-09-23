@@ -182,7 +182,8 @@ def create_task(body: TaskIn, conn: sqlite3.Connection = Depends(db.get_conn),
         conn.execute("UPDATE agent_tasks SET status = 'denied', result = ?, finished_at = ? WHERE id = ?",
                      (db.jdump({"denied": True, "reasons": plan["reasons"]}), now, task_id))
         conn.commit()
-        return db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (task_id,))
+        return db.decode_json(db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (task_id,)),
+                          "result", "request", default=None)   # SEC-091
     if plan["status"] == "awaiting_approval":
         approval = None
         # Create approval(s) for the consequential steps
@@ -207,7 +208,8 @@ def create_task(body: TaskIn, conn: sqlite3.Connection = Depends(db.get_conn),
                      ("completed" if not result.get("errors") else "failed",
                       db.jdump(result), db.utcnow(), task_id))
         conn.commit()
-    return db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (task_id,))
+    return db.decode_json(db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (task_id,)),
+                          "result", "request", default=None)   # SEC-091
 
 
 @router.get("/tasks")
@@ -239,7 +241,9 @@ def get_task(task_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
         raise HTTPException(404, {"code": "not_found"})
     t["result"] = db.jload(t.get("result"))
     t["request"] = db.jload(t.get("request"), {}).get("original")
-    t["tool_calls"] = db.q(conn, "SELECT * FROM tool_calls WHERE task_id = ? ORDER BY id", (task_id,))
+    t["tool_calls"] = db.decode_rows(
+        db.q(conn, "SELECT * FROM tool_calls WHERE task_id = ? ORDER BY id", (task_id,)),
+        "args", "result", default=None)   # SEC-091
     t["approvals"] = db.q(conn, "SELECT * FROM approvals WHERE task_id = ? ORDER BY id", (task_id,))
     return t
 

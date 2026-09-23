@@ -164,7 +164,9 @@ def list_audit(conn: sqlite3.Connection = Depends(db.get_conn),
         where.append("actor_name = ?")
         params.append(actor)
     sql = "SELECT * FROM audit_events WHERE " + " AND ".join(where)
-    return db.paged(conn, sql, tuple(params), "ORDER BY seq DESC", page, page_size)
+    out = db.paged(conn, sql, tuple(params), "ORDER BY seq DESC", page, page_size)
+    out["items"] = db.decode_rows(out["items"], "detail", default={})   # SEC-091
+    return out
 
 
 @router.get("/audit/verify")

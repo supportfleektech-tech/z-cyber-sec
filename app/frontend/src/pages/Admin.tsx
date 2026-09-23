@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, fmtTs } from "../api";
-import { ConfirmButton, LoadBlock, Modal, PageHead, Pager, StBadge, useApi, useFlash } from "../components";
+import { ConfirmButton, LoadBlock, Modal, PageHead, Pager, StBadge, useApi, useFlash, fmtJson } from "../components";
 
 interface UserRow {
   id: number;
@@ -17,7 +17,7 @@ interface AuditRow {
   action: string;
   target_type: string | null;
   target_id: string | null;
-  detail: string | null;
+  detail: string | Record<string, unknown> | null;
 }
 interface Flag {
   id: number;
@@ -130,8 +130,8 @@ function AuditTab({ onFlash }: { onFlash: (m: string, ok?: boolean) => void }) {
                   <td>{r.actor_name}</td>
                   <td className="mono">{r.action}</td>
                   <td className="dim">{r.target_type ? `${r.target_type}:${r.target_id || ""}` : "—"}</td>
-                  <td className="dim" style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.detail || ""}>
-                    {r.detail || ""}
+                  <td className="dim" style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={fmtJson(r.detail)}>
+                    {fmtJson(r.detail)}
                   </td>
                 </tr>
               ))}

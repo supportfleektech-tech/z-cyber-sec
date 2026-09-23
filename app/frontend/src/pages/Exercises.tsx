@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, fmtTs } from "../api";
-import { ConfirmButton, LoadBlock, Modal, PageHead, StBadge, useApi, useFlash } from "../components";
+import { ConfirmButton, LoadBlock, Modal, PageHead, StBadge, useApi, useFlash, fmtJson } from "../components";
 
 interface Exercise {
   id: number;
@@ -13,7 +13,7 @@ interface Exercise {
   targets: string[] | null;
 }
 interface ExerciseDetail extends Exercise {
-  runs: { id: number; started_at: string; finished_at: string | null; result: string; detail: string | null }[];
+  runs: { id: number; started_at: string; finished_at: string | null; result: string; detail: string | Record<string, unknown> | null }[];
 }
 interface Paged<T> {
   items: T[];
@@ -182,7 +182,7 @@ function ExerciseDetailModal({ e, onClose, onFlash }: { e: Exercise; onClose: ()
                   <td className="dim mono">{fmtTs(r.started_at)}</td>
                   <td className="dim mono">{fmtTs(r.finished_at)}</td>
                   <td><StBadge value={r.result} /></td>
-                  <td className="dim">{r.detail || "—"}</td>
+                  <td className="dim">{fmtJson(r.detail) || "—"}</td>
                 </tr>
               ))}
               {!detail.data.runs.length && <tr><td colSpan={4} className="empty">No runs yet.</td></tr>}

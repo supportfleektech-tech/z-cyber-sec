@@ -191,7 +191,9 @@ def list_events(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = De
         params.append(data_class)
     sql = ("SELECT id, ts, source_type, source_name, host, user, action, outcome, severity, msg, "
            "data, data_class FROM events WHERE " + " AND ".join(where))
-    return db.paged(conn, sql, tuple(params), "ORDER BY ts DESC, id DESC", page, page_size)
+    out = db.paged(conn, sql, tuple(params), "ORDER BY ts DESC, id DESC", page, page_size)
+    out["items"] = db.decode_rows(out["items"], "data", default={})   # SEC-091
+    return out
 
 
 class AlertUpdate(BaseModel):
@@ -233,7 +235,10 @@ def get_alert(alert_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
                         "FROM events WHERE id IN (%s) ORDER BY ts" %
                         ",".join("?" * len(db.jload(a["event_ids"], []))),
                         tuple(db.jload(a["event_ids"], [])))
-    return {"alert": a, "events": events[:100]}
+    # SEC-091: `event_ids` came back as JSON text here (and on PATCH below) while
+    # the SPA reads it as an array, and each event's `data` was double-encoded.
+    a = db.decode_json(a, "event_ids", default=[])
+    return {"alert": a, "events": db.decode_rows(events[:100], "data", default={})}
 
 
 @router.patch("/alerts/{alert_id}")
@@ -273,7 +278,8 @@ def update_alert(alert_id: int, body: AlertUpdate, conn: sqlite3.Connection = De
     conn.commit()
     record_audit(conn, _actor(user), "alert.updated", target_type="alert", target_id=str(alert_id),
                  detail={k: v for k, v in body.model_dump().items() if v is not None})
-    return db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,))
+    return db.decode_json(db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,)),
+                          "event_ids", default=[])   # SEC-091
 
 
 # ------------------------------------------------------------- detection rules

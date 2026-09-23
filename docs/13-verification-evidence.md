@@ -832,10 +832,13 @@ parity), ruff clean.
 Suite 259 → **263 passed** (4 new/updated: posture partial update, report title,
 run note, agent rename), ruff clean.
 
-**Current totals:** **263 tests pass** (`pytest -q`, ~3 min), ruff clean,
+Suite 263 → **265 passed** (2 new: the JSON-as-text sweep over every GET route,
+and the SPA `fmtJson` rendering guard), ruff clean.
+
+**Current totals:** **265 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(292.19 kB / 81.47 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-090 series was reproduced first (as a failing check or a live request) and
+(292.27 kB / 81.50 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-091 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -862,6 +865,10 @@ re-verified afterwards, live where the defect was live.
 - **Agent LLM adapters (SEC-050)**: now wired (builtin/openai_compat/cli) and
   tested with a stubbed LLM + real subprocess; a live local model end-to-end
   (e.g. Ollama) is not exercised in this sandbox — **Proposed**.
+- **Do not run two pytest processes at once**: `tests/conftest.py` uses one
+  fixed data dir (`tests/.testdata`) and wipes it per test, so a second run
+  clobbers the first (observed as `sqlite3.IntegrityError: UNIQUE constraint
+  failed` during seeding and unrelated failures). One run at a time.
 - Sandbox workspace restores wipe excluded dirs (`.venv`, `data/`,
   `node_modules`, `dist`); recovery is documented in this file's
   environment section and takes < 5 minutes (venv + pip install +
@@ -1011,3 +1018,42 @@ name. Both SPA payloads were narrowed to the field being changed.
 it); the dry-run note round-trips to the run record and audit; renaming
 `opencode-repo` → `repo-scanner` works (audit `renamed_from`), a collision is
 `409 exists`, and renaming `internal-automation` is `409 rename_not_supported`.
+
+### SEC-091 — JSON columns returned as text; two SPA pages crashed (fixed)
+
+Found by walking every GET route in the live OpenAPI schema and flagging string
+values that parse as JSON containers — the same family as SEC-089, but systemic.
+Before the fix the sweep reported **53 leaks** across 11 routes, and the detail
+routes were inconsistent with their own list routes (`GET /api/exercises` decoded
+`targets`, `GET /api/exercises/{id}` did not).
+
+Two of them were not cosmetic. The SPA reads those fields as arrays:
+
+- `Grc.tsx` — `r.mitigations?.join("; ")`
+- `Exercises.tsx` — `e.targets?.join(", ")` (list and detail views)
+
+**Live-verified before the fix:** `GET /api/grc/risks` returned
+`mitigations = '[\"Tool allowlist\", \"Approval gates\", \"Evals in CI\"]'`
+(a string) and `GET /api/exercises/1` the same shape for `targets`; evaluated in
+node with those exact values, both expressions throw
+`TypeError: ... .join is not a function` during render. A throw inside a React 18
+render with no error boundary unmounts the whole root, so the tab showed a blank
+app. (`Soc.tsx`'s `JSON.stringify(e.data)` merely displayed `"{\"pid\": 37446}"`.)
+
+**Fixed:** `db.decode_json` / `db.decode_rows` applied at every flagged response
+site — events `data`, alerts `event_ids` (+ nested event `data`), GRC risk
+`mitigations` (list/create/update), exercise `targets`/`meta`/`runs[].detail`,
+asset `meta`, cloud asset `meta`, posture `meta`, scan-run `meta`, agent task
+`result`/`request` and nested `tool_calls[].args/result`, and audit `detail`.
+Tests that had learned to `db.jload()` an API response were corrected to use the
+object.
+
+**Live (after fix):** the sweep reports **0 leaks across 59 GET routes**; with the
+real payloads, `mitigations?.join("; ")` renders
+`Tool allowlist; Approval gates; Evals in CI`, `targets?.join(", ")` renders
+`test1@test.local, test2@test.local`, `event_ids` is an 8-element array, and
+`e.data.pid` is a number.
+
+**Regression guard:** `test_no_get_route_returns_json_as_text` does the same walk
+inside the suite (>40 routes asserted); verified non-vacuous by removing one
+decode and watching it fail with the original payload.

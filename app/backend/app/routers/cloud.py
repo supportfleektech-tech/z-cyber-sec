@@ -57,7 +57,8 @@ def create_asset(body: CloudAssetIn, conn: sqlite3.Connection = Depends(db.get_c
     conn.commit()
     record_audit(conn, _actor(user), "cloud.asset.created", target_type="cloud_asset",
                  target_id=str(cur.lastrowid), detail={"name": body.name, "type": body.type})
-    return db.one(conn, "SELECT * FROM cloud_assets WHERE id = ?", (cur.lastrowid,))
+    return db.decode_json(db.one(conn, "SELECT * FROM cloud_assets WHERE id = ?", (cur.lastrowid,)),
+                          "meta", default={})
 
 
 @router.get("/assets")
@@ -67,7 +68,9 @@ def list_assets(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = De
     if provider:
         sql += " WHERE provider = ?"
         params = (provider,)
-    return db.paged(conn, sql, params, "ORDER BY name", page, page_size)
+    out = db.paged(conn, sql, params, "ORDER BY name", page, page_size)
+    out["items"] = db.decode_rows(out["items"], "meta", default={})   # SEC-091
+    return out
 
 
 class PostureIn(BaseModel):
@@ -94,7 +97,8 @@ def create_posture(body: PostureIn, conn: sqlite3.Connection = Depends(db.get_co
     conn.commit()
     record_audit(conn, _actor(user), "cloud.posture.created", target_type="posture_finding",
                  target_id=str(cur.lastrowid), detail={"rule_id": body.rule_id})
-    return db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (cur.lastrowid,))
+    return db.decode_json(db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (cur.lastrowid,)),
+                          "meta", default={})
 
 
 @router.get("/posture")
@@ -110,7 +114,9 @@ def list_posture(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = D
         params.append(status)
     sql = ("SELECT p.*, ca.name AS asset_name, ca.provider FROM posture_findings p "
            "JOIN cloud_assets ca ON ca.id = p.asset_id WHERE " + " AND ".join(where))
-    return db.paged(conn, sql, tuple(params), "ORDER BY p.id DESC", page, page_size)
+    out = db.paged(conn, sql, tuple(params), "ORDER BY p.id DESC", page, page_size)
+    out["items"] = db.decode_rows(out["items"], "meta", default={})   # SEC-091
+    return out
 
 
 class PostureUpdateIn(BaseModel):
@@ -157,4 +163,5 @@ def update_posture(finding_id: int, body: PostureUpdateIn, conn: sqlite3.Connect
                  target_id=str(finding_id),
                  detail={"changed": sorted(provided),
                          "status": p["status"] if "status" not in provided else body.status})
-    return db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (finding_id,))
+    return db.decode_json(db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (finding_id,)),
+                          "meta", default={})

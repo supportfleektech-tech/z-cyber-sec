@@ -48,7 +48,8 @@ def create_asset(body: AssetIn, conn: sqlite3.Connection = Depends(db.get_conn),
     conn.commit()
     record_audit(conn, _actor(user), "asset.created", target_type="asset", target_id=str(cur.lastrowid),
                  detail={"name": body.name, "type": body.type, "environment": body.environment})
-    return db.one(conn, "SELECT * FROM assets WHERE id = ?", (cur.lastrowid,))
+    return db.decode_json(db.one(conn, "SELECT * FROM assets WHERE id = ?", (cur.lastrowid,)),
+                          "meta", default={})
 
 
 @router.get("")
@@ -70,7 +71,9 @@ def list_assets(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = De
         where.append("name LIKE ?")
         params.append(f"%{q}%")
     sql = "SELECT * FROM assets WHERE " + " AND ".join(where)
-    return db.paged(conn, sql, tuple(params), "ORDER BY name", page, page_size)
+    out = db.paged(conn, sql, tuple(params), "ORDER BY name", page, page_size)
+    out["items"] = db.decode_rows(out["items"], "meta", default={})   # SEC-091
+    return out
 
 
 @router.patch("/{asset_id}")
@@ -97,4 +100,5 @@ def update_asset(asset_id: int, body: AssetIn, conn: sqlite3.Connection = Depend
     record_audit(conn, _actor(user), "asset.updated", target_type="asset", target_id=str(asset_id),
                  detail={"status": body.status,
                          **({"renamed_from": a["name"]} if body.name != a["name"] else {})})
-    return db.one(conn, "SELECT * FROM assets WHERE id = ?", (asset_id,))
+    return db.decode_json(db.one(conn, "SELECT * FROM assets WHERE id = ?", (asset_id,)),
+                          "meta", default={})

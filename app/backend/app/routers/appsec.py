@@ -44,7 +44,8 @@ def create_scan_run(body: ScanRunIn, conn: sqlite3.Connection = Depends(db.get_c
     conn.commit()
     record_audit(conn, _actor(user), "appsec.scan_run.created", target_type="scan_run",
                  target_id=str(cur.lastrowid), detail={"repo": body.repo, "kind": body.kind})
-    return db.one(conn, "SELECT * FROM scan_runs WHERE id = ?", (cur.lastrowid,))
+    return db.decode_json(db.one(conn, "SELECT * FROM scan_runs WHERE id = ?", (cur.lastrowid,)),
+                          "meta", default={})
 
 
 @router.get("/scan-runs")
@@ -54,8 +55,10 @@ def list_scan_runs(conn: sqlite3.Connection = Depends(db.get_conn), user: dict =
     if repo:
         sql += " WHERE repo = ?"
         params = (repo,)
-    return db.paged(conn, sql, params, "ORDER BY COALESCE(finished_at, started_at) DESC, id DESC",
-                    page, page_size)
+    out = db.paged(conn, sql, params, "ORDER BY COALESCE(finished_at, started_at) DESC, id DESC",
+                   page, page_size)
+    out["items"] = db.decode_rows(out["items"], "meta", default={})   # SEC-091
+    return out
 
 
 class SarifImportIn(BaseModel):

@@ -158,3 +158,74 @@ def test_limiter_evicts_stale_keys():
     # Every one of those keys is long stale by now → one call triggers the sweep.
     ratelimit.check("fresh", limit=5, window_s=10, now=3600.0)
     assert len(ratelimit._hits) == 1
+
+
+def test_no_get_route_returns_json_as_text(client, seeded):
+    """SEC-091: JSON columns are stored as text and routes decoded them
+    inconsistently — the same field was an array in one response and a JSON
+    string in another. Clients read the structured shape, so a forgotten decode
+    hands them a string: `mitigations?.join("; ")` does not degrade, it throws,
+    which blanked the GRC and Exercises pages in the SPA (live-verified before
+    the fix: `[\"Tool allowlist\", ...]` as a string, and `.join` raising
+    `TypeError: ... .join is not a function`).
+
+    This walks every GET route in the OpenAPI schema and asserts no string value
+    is really a JSON list/object. It is the check that would have caught the
+    original bug: it fails on the next route that forgets to decode.
+    """
+    import json
+    import re
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    spec = client.get("/api/openapi.json").json()
+
+    def walk(node, path=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from walk(v, f"{path}.{k}" if path else k)
+        elif isinstance(node, list):
+            for i, v in enumerate(node[:20]):
+                yield from walk(v, f"{path}[{i}]")
+        else:
+            yield path, node
+
+    leaks, checked = [], 0
+    for path, methods in spec["paths"].items():
+        if "get" not in methods or "download" in path or "export" in path:
+            continue
+        url = re.sub(r"\{[^}]+\}", "1", path)
+        r = client.get(url)
+        if r.status_code != 200 or "json" not in r.headers.get("content-type", ""):
+            continue
+        checked += 1
+        for field, value in walk(r.json()):
+            if isinstance(value, str) and len(value) > 2 and value[0] in "[{" and value[-1] in "]}":
+                try:
+                    parsed = json.loads(value)
+                except ValueError:
+                    continue
+                if isinstance(parsed, (list, dict)):
+                    leaks.append(f"{url} -> {field} = {value[:60]}")
+    assert checked > 40, f"expected to exercise the API surface, only checked {checked} routes"
+    assert not leaks, "JSON returned as text:\n" + "\n".join(leaks)
+
+
+def test_spa_renders_decoded_json_through_fmtjson(client, seeded):
+    """SEC-091: decoding JSON fields turns them into objects, and rendering an
+    object as a React child throws — so the two places that used to print the raw
+    string must go through `fmtJson` (which stringifies objects and passes
+    strings through). Without this the fix would swap one blank page for
+    another."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    admin = (src / "pages" / "Admin.tsx").read_text()
+    exercises = (src / "pages" / "Exercises.tsx").read_text()
+    components = (src / "components.tsx").read_text()
+
+    assert "export function fmtJson" in components
+    assert "fmtJson(r.detail)" in admin and "title={fmtJson(r.detail)}" in admin
+    assert "fmtJson(r.detail)" in exercises
+    # audit detail comes back structured now, and the pages type it accordingly
+    assert "string | Record<string, unknown> | null" in admin
+    assert "string | Record<string, unknown> | null" in exercises

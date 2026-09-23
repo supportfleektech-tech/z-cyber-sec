@@ -78,6 +78,29 @@ def jdump(v) -> str | None:
     return None if v is None else json.dumps(v)
 
 
+def decode_json(row: dict | None, *columns: str, default=None) -> dict | None:
+    """Copy `row` with JSON-text columns decoded (SEC-091).
+
+    JSON columns are stored as text, and routes decoded them inconsistently: the
+    same field was an array in one response and JSON text in another. Clients
+    (including this project's own SPA) read the array shape, so a route that
+    forgot to decode handed them a string — `mitigations?.join("; ")` does not
+    fail on the string, it throws.
+    """
+    if row is None:
+        return None
+    out = dict(row)
+    for col in columns:
+        if col in out:
+            out[col] = jload(out.get(col), default)
+    return out
+
+
+def decode_rows(rows: list[dict], *columns: str, default=None) -> list[dict]:
+    """Row-list form of `decode_json`."""
+    return [decode_json(r, *columns, default=default) or {} for r in rows]
+
+
 def jload(v: str | None, default=None):
     if v in (None, ""):
         return default

@@ -237,6 +237,21 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## JSON fields
+
+JSON columns (lists, dicts) are stored as text in SQLite and **returned as JSON**:
+a list field is a JSON array, a dict field a JSON object. They are not
+double-encoded. This was not always true — routes decoded inconsistently, so the
+same field was an array in one response and a JSON string in another, and the SPA
+read the structured shape (`mitigations?.join("; ")` throws on a string, which
+blanked the GRC and Exercises pages) — see SEC-091. `db.decode_json` /
+`db.decode_rows` are the helpers, and
+`tests/test_api_surface_hardening.py::test_no_get_route_returns_json_as_text`
+walks every GET route in the schema and fails on the next route that forgets.
+
+Fields that are deliberately opaque text (not JSON) are unaffected; the sweep
+above currently reports zero leaked JSON strings across all GET routes.
+
 ## Backup bundles
 
 A bundle is a `.tar.gz` produced by `POST /backup`: `cybersec.db`, an optional

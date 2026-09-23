@@ -160,6 +160,8 @@ def list_risks(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Dep
         sql += " WHERE status = ?"
         params = (status,)
     rows = db.q(conn, f"{sql} ORDER BY score DESC, id DESC", params)
+    for r in rows:
+        r["mitigations"] = db.jload(r.get("mitigations"), [])   # SEC-091
     return {"items": rows, "total": len(rows)}
 
 
@@ -203,4 +205,5 @@ def update_risk(risk_id: int, body: RiskUpdate, conn: sqlite3.Connection = Depen
     conn.commit()
     record_audit(conn, _actor(user), "grc.risk.updated", target_type="risk", target_id=str(risk_id),
                  detail={k: v for k, v in body.model_dump().items() if v is not None})
-    return db.one(conn, "SELECT * FROM risks WHERE id = ?", (risk_id,))
+    return db.decode_json(db.one(conn, "SELECT * FROM risks WHERE id = ?", (risk_id,)),
+                          "mitigations", default=[])   # SEC-091

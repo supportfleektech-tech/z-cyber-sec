@@ -94,6 +94,13 @@ def get_exercise(ex_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
     if not e:
         raise HTTPException(404, {"code": "not_found"})
     e["runs"] = db.q(conn, "SELECT * FROM exercise_runs WHERE exercise_id = ? ORDER BY id DESC", (ex_id,))
+    # SEC-091: the list route decoded these but the detail route did not, so the
+    # same field was an array in one response and JSON text in the other — and
+    # the SPA's `targets?.join(", ")` threw on the string.
+    e["targets"] = db.jload(e.get("targets"), [])
+    e["meta"] = db.jload(e.get("meta"), {})
+    for r in e["runs"]:
+        r["detail"] = db.jload(r.get("detail"), {})
     return e
 
 
