@@ -119,3 +119,15 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
 - Platform owner: the operator (single-operator lab by design).
 - Release approver: must be an admin-role human who is NOT the author of
   the change under review (the gate records `decided_by` in the audit chain).
+
+### Restore safety (SEC-085/086)
+
+Restore only accepts a file that resolves **inside** `data/backups`
+(`400 bad_path` otherwise — a path like `/tmp/evil-backups/x` no longer passes
+just because it contains the word "backups"). The bundle is verified before
+anything is replaced: unlisted members, links, `..`/absolute member names and
+checksum mismatches are refused, and an unreadable archive returns
+`409 verify_failed: unreadable bundle: ...` instead of a 500. A refusal is
+always **before** any file is overwritten, so a bad bundle cannot damage the
+live database. Keep `data/backups` writable only by the service account —
+whoever can write a bundle can author its manifest.

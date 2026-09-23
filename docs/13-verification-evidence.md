@@ -822,10 +822,13 @@ Verified directly against the service (clean temp DB):
 Suite 247 → **250 passed** (3 new: truncation detected, healing/laundering
 prevented, anchor tracks appends), ruff clean.
 
-**Current totals:** **250 tests pass** (`pytest -q`, ~3 min), ruff clean,
+Suite 250 → **253 passed** (3 new: restore path containment, crafted bundle
+refused, corrupt bundle is a clean 409), ruff clean.
+
+**Current totals:** **253 tests pass** (`pytest -q`, ~3 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (291.98 kB / 81.46 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-083 series was reproduced first (as a failing check or a live request) and
+SEC-086 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -860,3 +863,44 @@ re-verified afterwards, live where the defect was live.
   branch pointer to the base commit — fixed with
   `git fetch origin <branch> && git reset --soft FETCH_HEAD`
   (working tree untouched), verified via `git status` before continuing.
+
+### SEC-085 — restore path traversal (fixed)
+
+**Was:** `POST /api/admin/backup/restore` guarded its path with
+`"backups" not in str(path)` — a substring test reported as containment — and
+`verify_bundle` iterated only over `manifest["files"]`, so an **unlisted** tar
+member was invisible to it. `restore_from` then joined `evidence/<member>` onto
+the evidence directory, so `evidence/../../../../../../tmp/x` was written
+outside the store.
+
+**Reproduced (before fix):** a bundle cloned from a real backup with one extra
+member `evidence/../../../../../../tmp/escaped_by_restore.txt` **passed
+verification** and wrote `/tmp/escaped_by_restore.txt` containing
+`PWNED-BY-TAR-TRAVERSAL`; separately `"backups" in "/tmp/evil-backups/stale.db"`
+was `True`, so the guard admitted a bundle from anywhere.
+
+**Fixed:** the endpoint resolves the path and requires a real file inside
+`settings.backups_dir`; `verify_bundle` additionally rejects unlisted members,
+symlinks/hardlinks and absolute/`..` member names; `restore_from` copies only
+members that are declared in the manifest *and* resolve inside the evidence
+directory, raising otherwise.
+
+**Live (after fix, this host):** `/tmp/evil-backups/stale.db` → `400 bad_path`;
+`data/backups/../../data/cybersec.db` → `400 bad_path`; crafted bundle with the
+traversal members above → `409 verify_failed` listing
+`unsafe:evidence/../../../../../../tmp/pwned_live.txt`, `unsafe:/tmp/pwned_abs.txt`
+and the matching `unlisted:` entries, with **no** file created outside the store;
+`POST /api/admin/backup` → `POST /api/admin/backup/restore` round-trip still
+`200 {"ok":true}`; `/api/healthz` healthy afterwards.
+
+### SEC-086 — corrupt bundles returned an opaque 500 (fixed)
+
+Found while verifying SEC-085. A file inside `data/backups` that was not a
+readable archive (interrupted copy, disk full, wrong file) raised out of
+`verify_bundle` and surfaced as `500 internal_error`; the operator had to read
+server logs to learn their backup was unreadable. Worse, the 409 branch built
+its message as `str(v.get("bad"))`, which renders as `"None"` for the
+`error`-style rejections. Now `409 verify_failed` with
+`unreadable bundle: ReadError: not a gzip file` (also for truncated archives and
+manifests without a `files` map), `restore_refused` for defence-in-depth
+refusals, and the app stays healthy. Both cases covered by tests.

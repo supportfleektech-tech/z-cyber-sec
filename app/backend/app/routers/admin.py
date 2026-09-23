@@ -218,16 +218,34 @@ def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
     if body.confirm != "RESTORE":
         raise HTTPException(400, {"code": "confirm_required",
                                   "message": "Set confirm='RESTORE' — this replaces live data."})
+    # SEC-085: this used to be `"backups" not in str(path)` — a substring test,
+    # so any path that merely *mentions* backups (e.g. /tmp/evil-backups/x or
+    # /backups/../../elsewhere/y) passed while the message claimed containment.
+    # Resolve and require real containment in the backups directory.
     path = Path(body.path)
-    if not path.exists() or "backups" not in str(path):
-        raise HTTPException(400, {"code": "bad_path", "message": "path must point into the backups directory"})
+    backups_dir = settings.backups_dir.resolve()
+    resolved = path.resolve() if path.exists() else None
+    if resolved is None or not resolved.is_file() or \
+            (resolved != backups_dir and backups_dir not in resolved.parents):
+        raise HTTPException(400, {
+            "code": "bad_path",
+            "message": f"path must be an existing file inside the backups directory ({backups_dir})"})
     v = verify_bundle(None, path)
     if not v["ok"]:
-        raise HTTPException(409, {"code": "verify_failed", "message": str(v.get("bad"))})
+        # SEC-086: `message` used to be `str(v.get("bad"))`, which renders as
+        # "None" for bundles rejected with an `error` (unreadable, no manifest) —
+        # the caller saw a 409 that explained nothing.
+        raise HTTPException(409, {
+            "code": "verify_failed",
+            "message": v.get("error") or f"bundle contents failed verification: {v.get('bad')}"})
     # Quiesce: close all per-request connections for this process, then restore.
     import app.db as dbmod
-    with dbmod._lock:
-        result = restore_from(path, _actor(user))
+    try:
+        with dbmod._lock:
+            result = restore_from(path, _actor(user))
+    except RuntimeError as e:      # SEC-086: defence-in-depth refusals are 409, not 500
+        raise HTTPException(409, {"code": "restore_refused",
+                                  "message": str(e)[:300]}) from e
     return result
 
 

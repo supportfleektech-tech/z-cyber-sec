@@ -79,22 +79,79 @@ def create_backup(conn, actor: dict, dest_dir: Path | None = None) -> dict:
             "records": manifest["record_counts"]}
 
 
+def safe_member_name(name: str) -> bool:
+    """Is this tar member name safe to join onto a destination directory?
+
+    SEC-085: the restore path joined `evidence/<member>` onto the evidence
+    directory, so a member named `evidence/../../../../tmp/x` wrote outside the
+    store. Absolute paths, drive letters and any `..` segment are rejected.
+    """
+    if not name or name.startswith(("/", "\\")) or ":" in name[:2]:
+        return False
+    return ".." not in name.replace("\\", "/").split("/")
+
+
+def contained(base: Path, relative: str) -> Path | None:
+    """Resolve ``base/relative`` and return it only if it stays inside base."""
+    target = (base / relative).resolve()
+    try:
+        base_res = base.resolve()
+    except OSError:  # pragma: no cover - unresolvable base
+        return None
+    return target if target == base_res or base_res in target.parents else None
+
+
 def verify_bundle(conn, tar_path: Path) -> dict:
-    """Extract in-memory check: manifest exists and checksums match."""
-    with tarfile.open(tar_path, "r:gz") as tar:
-        members = {m.name: m for m in tar.getmembers() if m.isfile()}
-        if "manifest.json" not in members:
-            return {"ok": False, "error": "missing manifest"}
-        manifest = json.load(io.BytesIO(tar.extractfile("manifest.json").read()))
-        bad = []
-        for name, expected in manifest["files"].items():
-            if name not in members:
-                bad.append(f"missing:{name}")
-                continue
-            data = tar.extractfile(name).read()
-            if hashlib.sha256(data).hexdigest() != expected:
-                bad.append(f"checksum:{name}")
-        return {"ok": not bad, "bad": bad, "files": len(manifest["files"])}
+    """Extract in-memory check: manifest exists, checksums match, and nothing
+    is smuggled in that the manifest does not account for.
+
+    SEC-085: this used to iterate *only* over `manifest["files"]`, so a member
+    the manifest never mentions (e.g. `evidence/../../etc/x`) passed verification
+    and was then written outside the evidence store by `restore_from`.
+    """
+    # SEC-086: a corrupt or truncated bundle (interrupted copy, disk full, a
+    # file that is simply not a tar.gz) raised straight out of here and became an
+    # opaque `500 internal_error` — the caller had to read server logs to learn
+    # that their backup file was unreadable. Malformed input is a normal
+    # operational case, so it is reported as a failed verification.
+    try:
+        with tarfile.open(tar_path, "r:gz") as tar:
+            return _verify_open_bundle(tar)
+    except (tarfile.TarError, OSError, json.JSONDecodeError, KeyError, EOFError) as e:
+        return {"ok": False, "error": f"unreadable bundle: {type(e).__name__}: {e}"[:200]}
+
+
+def _verify_open_bundle(tar) -> dict:
+    """The checks that need the archive open (called under verify_bundle's guard)."""
+    members = {m.name: m for m in tar.getmembers() if m.isfile()}
+    if "manifest.json" not in members:
+        return {"ok": False, "error": "missing manifest"}
+    manifest = json.load(io.BytesIO(tar.extractfile("manifest.json").read()))
+    if not isinstance(manifest.get("files"), dict):
+        return {"ok": False, "error": "manifest has no files map"}
+    listed = set(manifest["files"])
+    bad: list[str] = []
+    # (1) reject unsafe names and links outright. Directory entries are skipped:
+    # `tar.add(bundle, arcname="")` writes the bundle root as a member with an
+    # empty name, and directories are never extracted.
+    for m in tar.getmembers():
+        if m.issym() or m.islnk():
+            bad.append(f"link:{m.name}")
+            continue
+        if m.isfile() and not safe_member_name(m.name):
+            bad.append(f"unsafe:{m.name}")
+    # (2) every file in the archive must be declared in the manifest
+    for name in members:
+        if name != "manifest.json" and name not in listed:
+            bad.append(f"unlisted:{name}")
+    # (3) declared files must be present with matching checksums
+    for name, expected in manifest["files"].items():
+        if name not in members:
+            bad.append(f"missing:{name}")
+            continue
+        if hashlib.sha256(tar.extractfile(name).read()).hexdigest() != expected:
+            bad.append(f"checksum:{name}")
+    return {"ok": not bad, "bad": bad[:10], "files": len(manifest["files"])}
 
 
 def restore_from(tar_path: Path, actor: dict) -> dict:
@@ -114,12 +171,19 @@ def restore_from(tar_path: Path, actor: dict) -> dict:
         if ev_dir.exists():
             shutil.rmtree(ev_dir)
         ev_dir.mkdir(parents=True, exist_ok=True)
+        listed = set(json.loads(tar.extractfile("manifest.json").read()).get("files") or {})
         for m in tar.getmembers():
-            if m.isfile() and m.name.startswith("evidence/"):
-                target = ev_dir / m.name.split("/", 1)[1]
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with tar.extractfile(m) as src, target.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+            # SEC-085: only manifest-declared evidence files, and only when the
+            # resolved path stays inside the evidence directory. Verification
+            # already rejects these, but restore must not depend on it.
+            if not (m.isfile() and m.name.startswith("evidence/") and m.name in listed):
+                continue
+            target = contained(ev_dir, m.name.split("/", 1)[1])
+            if target is None:
+                raise RuntimeError(f"refusing unsafe bundle member: {m.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tar.extractfile(m) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
     for suffix in ("-wal", "-shm"):
         p = settings.db_path.parent / (settings.db_path.name + suffix)
         if p.exists():

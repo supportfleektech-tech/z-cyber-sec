@@ -193,11 +193,29 @@ are safe; at-most-once-per-interval by design.
 | `GET /settings` · `PUT /settings/{key}` | Runtime settings |
 | `GET/POST /integrations` · `POST /integrations/{id}/health` | Integration inventory + health probe |
 | `POST /backup` | Consistent backup → `{path, sha256, ...}` |
-| `POST /backup/restore` | `{path, confirm:"RESTORE"}`; path must be under `data/backups` |
+| `POST /backup/restore` | `{path, confirm:"RESTORE"}`; the path is **resolved and must be a file inside `data/backups`** (SEC-085 — a path that merely mentions "backups" is refused: `400 bad_path`). The bundle must pass `verify_bundle`: manifest present, every archive member declared in it, no symlinks/hardlinks, no `..`/absolute member names, checksums equal. Unreadable or corrupt archives are a `409 verify_failed` naming the reason (SEC-086), never a 500 |
 | `GET /retention/report` | Evidence retention **report only** (SEC-072, ADR-005): per-item `within_retention`/`due` + `legal_hold` (case-bound) flags; never deletes — deletion stays a human, audited act |
 | `POST /releases` | Record a human release decision (SEC-064): `{version, commit_sha, checklist_sha256 (64-hex), decision: approved\|rejected, comment?}` — admin only (`release.write`), audit-logged |
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
+
+## Backup bundles
+
+A bundle is a `.tar.gz` produced by `POST /backup`: `cybersec.db`, an optional
+`evidence/` tree, and `manifest.json` listing the sha256 of **every** file.
+Restore trusts that manifest in two independent ways (SEC-085):
+
+1. **`verify_bundle`** rejects any member the manifest does not declare, any
+   symlink/hardlink, and any member name that is absolute or contains a `..`
+   segment — so a valid-manifest bundle with an extra `evidence/../../tmp/x`
+   member no longer passes.
+2. **`restore_from`** does not rely on step 1: it copies only members that are
+   both declared in the manifest *and* resolve inside the evidence directory,
+   raising `restore_refused` otherwise.
+
+Bundles are ordinary files, not authenticated: anyone who can write into
+`data/backups` can craft one, so the directory's filesystem permissions are
+part of the trust boundary (see docs/09).
 
 ## Audit format
 
@@ -245,3 +263,6 @@ implemented.
 | `no_changes` | PATCH with empty diff |
 | `missing` | report file gone |
 | `confirm_required` | restore without `confirm:"RESTORE"` |
+| `bad_path` | restore path is not an existing file inside `data/backups` (SEC-085) |
+| `verify_failed` | bundle failed verification — corrupt/unreadable, manifest missing/broken, unlisted, unsafe or link member, or checksum mismatch (SEC-085/086) |
+| `restore_refused` | defence-in-depth refusal inside `restore_from` (SEC-085) |

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app import db
 
 
@@ -227,3 +229,110 @@ def test_healthz(client, seeded):
 def test_env_banner_header(client, seeded):
     r = client.get("/api/healthz")
     assert r.headers.get("X-Environment") == "LOCAL"
+
+
+def test_restore_path_must_really_be_in_the_backups_dir(client, seeded, tmp_path):
+    """SEC-085: the guard was `"backups" not in str(path)` — a substring test —
+    so any path that merely mentioned backups passed while the message claimed
+    containment."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    outside = tmp_path / "evil-backups" / "stale.db"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_bytes(b"not really a bundle")
+
+    r = client.post("/api/admin/backup/restore", json={"path": str(outside), "confirm": "RESTORE"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_path"
+    assert "backups directory" in r.json()["detail"]["message"]
+
+    # a directory (not a file) inside the backups dir is refused too
+    from app.config import settings
+    d = settings.backups_dir / "not-a-file"
+    d.mkdir(parents=True, exist_ok=True)
+    r = client.post("/api/admin/backup/restore", json={"path": str(d), "confirm": "RESTORE"})
+    assert r.status_code == 400
+
+    # traversal out of the backups dir, even if it starts inside it
+    sneaky = settings.backups_dir / ".." / "outside.db"
+    sneaky.write_bytes(b"x")
+    r = client.post("/api/admin/backup/restore", json={"path": str(sneaky), "confirm": "RESTORE"})
+    assert r.status_code == 400
+    sneaky.unlink(missing_ok=True)
+
+
+def test_crafted_bundle_cannot_write_outside_the_evidence_store(client, seeded, tmp_path):
+    """SEC-085: restore joined `evidence/<member>` onto the evidence directory,
+    so `evidence/../../../../tmp/x` escaped. Verification iterated only over the
+    manifest, so an unlisted member was invisible to it."""
+    import io
+    import tarfile
+    from pathlib import Path as _Path
+
+    from app.services.backup import contained, create_backup, restore_from, safe_member_name, verify_bundle
+
+    good = _Path(create_backup(seeded, {"type": "user", "id": "1", "name": "admin"})["path"])
+    assert verify_bundle(None, good)["ok"] is True          # legitimate bundle
+
+    evil = tmp_path / "crafted.db"
+    with tarfile.open(good, "r:gz") as src:
+        members = [(m, src.extractfile(m).read() if m.isfile() else None) for m in src.getmembers()]
+    with tarfile.open(evil, "w:gz") as dst:
+        for m, data in members:
+            dst.addfile(m, io.BytesIO(data) if data is not None else None)
+        for name in ("evidence/../../../../../../tmp/cybersec_escape.txt", "/tmp/cybersec_absolute.txt"):
+            info = tarfile.TarInfo(name)
+            info.size = 5
+            dst.addfile(info, io.BytesIO(b"PWNED"))
+
+    v = verify_bundle(None, evil)
+    assert v["ok"] is False
+    assert any(x.startswith("unsafe:") for x in v["bad"])
+    assert any(x.startswith("unlisted:") for x in v["bad"])
+
+    escapees = [_Path("/tmp/cybersec_escape.txt"), _Path("/tmp/cybersec_absolute.txt")]
+    for f in escapees:
+        f.unlink(missing_ok=True)
+    with pytest.raises(RuntimeError):
+        restore_from(evil, {"type": "user", "id": "1", "name": "admin"})
+    assert not any(f.exists() for f in escapees)
+
+    # the primitives themselves
+    for bad in ("evidence/../x", "../x", "/etc/passwd", "a/../../b"):
+        assert safe_member_name(bad) is False
+    assert safe_member_name("evidence/ok.bin") is True
+    base = tmp_path / "ev"
+    base.mkdir()
+    assert contained(base, "sub/ok.bin") is not None
+    assert contained(base, "../escape.bin") is None
+
+
+def test_corrupt_bundle_is_a_clean_refusal_not_a_500(client, seeded):
+    """SEC-086: `verify_bundle` raised on unreadable archives, so restoring an
+    interrupted/corrupt backup returned an opaque 500 and the operator had to
+    read server logs to learn their file was unreadable. It is now a 409 whose
+    message names the reason, and the 409 for error-style failures no longer
+    renders as "None"."""
+    from app.config import settings
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    settings.backups_dir.mkdir(parents=True, exist_ok=True)
+    junk = settings.backups_dir / "corrupt-test.db"
+    junk.write_bytes(b"this is not a tar.gz at all")
+
+    r = client.post("/api/admin/backup/restore", json={"path": str(junk), "confirm": "RESTORE"})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "verify_failed"
+    assert detail["message"] != "None" and "unreadable bundle" in detail["message"]
+
+    # truncated archive: recognisable extension, unusable content
+    from app.services.backup import create_backup
+    good = Path(create_backup(seeded, {"type": "user", "id": "1", "name": "admin"})["path"])
+    trunc = settings.backups_dir / "truncated-test.db"
+    trunc.write_bytes(good.read_bytes()[: len(good.read_bytes()) // 2])
+    r = client.post("/api/admin/backup/restore", json={"path": str(trunc), "confirm": "RESTORE"})
+    assert r.status_code == 409 and "unreadable bundle" in r.json()["detail"]["message"]
+
+    # and the app is still healthy afterwards
+    junk.unlink(missing_ok=True)
+    trunc.unlink(missing_ok=True)
+    assert client.get("/api/healthz").json()["ok"] is True
