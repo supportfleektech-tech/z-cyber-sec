@@ -829,10 +829,13 @@ Suite 253 → **259 passed** (6 new: TTL expiry, audited upsert + revocation,
 create-status validation, STIX validity window, PATCH preservation, MITRE payload
 parity), ruff clean.
 
-**Current totals:** **259 tests pass** (`pytest -q`, ~3 min), ruff clean,
+Suite 259 → **263 passed** (4 new/updated: posture partial update, report title,
+run note, agent rename), ruff clean.
+
+**Current totals:** **263 tests pass** (`pytest -q`, ~3 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(292.26 kB / 81.49 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-089 series was reproduced first (as a failing check or a live request) and
+(292.19 kB / 81.47 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-090 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -974,3 +977,37 @@ the shape. The report generator renders the MITRE cell as text
 
 **Live (after fix):** `{"mitre_tactics": ["T1041","T1110"]}` → `201`, round-trips
 as `["T1041","T1110"]`; a bare string still returns the documented 422 envelope.
+
+### SEC-090 — request fields that were accepted and never applied (fixed)
+
+Found with an AST sweep of every router: for each Pydantic request model, which
+declared fields does the handler never read? (The sweep has to exclude
+`model_dump()`/`getattr()`/`model_fields_set` handlers and nested helpers, which
+is how SEC-088 hid.) Four sites discarded input:
+
+| Route | Field(s) dropped | Consequence |
+|---|---|---|
+| `PATCH /cloud/posture/{id}` | took the *create* model: `asset_id`/`rule_id`/`title` required and unwritten, `detail` written | **data loss** — the SPA's status change omits `detail`, so the evidence text was wiped on a `200` |
+| `POST /reports` | `title` | the SPA's title box had no effect; a generated title was stored and rendered |
+| `POST /automation/{id}/run` | `note` | the operator's stated reason for the run vanished (scheduler runs, approvals, dismissals and engagements all keep theirs) |
+| `PATCH /agents/{id}` · `PATCH /assets/{id}` | `name` | a rename returned `200` and changed nothing |
+
+**Live-verified before the fix:** `PATCH /api/cloud/posture/4 {"asset_id":1,
+"rule_id":"CIS-1.1","title":"placeholder","status":"resolved"}` → `200`, and
+`detail` went from `"cert expiry 2026-09-27."` to `None`; the sent
+`asset_id`/`rule_id`/`title` were ignored.
+
+**Fixed:** `PostureUpdateIn` is a true partial update (only sent fields written,
+`400 no_changes` when empty, `400 bad_asset` for an unknown asset, `changed` in
+the audit detail); `title` is threaded through `ReportBuilder.build()` to every
+kind (and escaped in the artefact); the run note is kept on the run result and
+the audit entry for all four outcomes; renames are applied with a uniqueness
+check, `renamed_from` in the audit detail, and an explicit
+`409 rename_not_supported` for the automation identity the runner resolves by
+name. Both SPA payloads were narrowed to the field being changed.
+
+**Live (after fix):** posture status change keeps `detail`; `POST /reports
+{"title": "Q3 board summary"}` stores and renders that title (and escapes HTML in
+it); the dry-run note round-trips to the run record and audit; renaming
+`opencode-repo` → `repo-scanner` works (audit `renamed_from`), a collision is
+`409 exists`, and renaming `internal-automation` is `409 rename_not_supported`.

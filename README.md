@@ -91,7 +91,7 @@ infra/                   # README + local compose, target-host network matrix, p
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q          # 259 tests
+cd app/backend && .venv/bin/python -m pytest -q          # 263 tests
 cd app/backend && .venv/bin/ruff check app/ scripts/ tests/
 cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
 cd app/frontend && npm run build                         # tsc -b && vite build

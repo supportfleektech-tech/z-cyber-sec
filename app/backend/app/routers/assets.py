@@ -81,11 +81,20 @@ def update_asset(asset_id: int, body: AssetIn, conn: sqlite3.Connection = Depend
         raise HTTPException(404, {"code": "not_found"})
     if body.type not in ASSET_TYPES or body.status not in STATUSES:
         raise HTTPException(400, {"code": "bad_value"})
+    # SEC-090: `name` was required in the body and never written — an edit that
+    # corrected a name returned 200 and kept the old one. Write it, and keep the
+    # create-time uniqueness invariant while doing so.
+    if body.name != a["name"]:
+        if db.one(conn, "SELECT id FROM assets WHERE name = ? AND id <> ?", (body.name, asset_id)):
+            raise HTTPException(409, {"code": "exists",
+                                      "message": f"another asset is already named {body.name!r}"})
     conn.execute(
-        "UPDATE assets SET type=?, environment=?, owner=?, group_name=?, status=?, meta=?, updated_at=? WHERE id=?",
-        (body.type, body.environment, body.owner, body.group_name, body.status,
+        "UPDATE assets SET name=?, type=?, environment=?, owner=?, group_name=?, status=?, meta=?, "
+        "updated_at=? WHERE id=?",
+        (body.name, body.type, body.environment, body.owner, body.group_name, body.status,
          db.jdump(body.meta), db.utcnow(), asset_id))
     conn.commit()
     record_audit(conn, _actor(user), "asset.updated", target_type="asset", target_id=str(asset_id),
-                 detail={"status": body.status})
+                 detail={"status": body.status,
+                         **({"renamed_from": a["name"]} if body.name != a["name"] else {})})
     return db.one(conn, "SELECT * FROM assets WHERE id = ?", (asset_id,))

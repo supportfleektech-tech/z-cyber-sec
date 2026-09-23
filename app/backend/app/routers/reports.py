@@ -31,7 +31,11 @@ def generate(body: ReportIn, conn: sqlite3.Connection = Depends(db.get_conn),
     if body.kind not in KINDS:
         raise HTTPException(400, {"code": "bad_kind", "message": f"kind must be one of {KINDS}"})
     builder = ReportBuilder(conn)
-    return builder.build(body.kind, body.filters or {}, user["username"])
+    # SEC-090: `title` was accepted and dropped — the SPA offers a title box on
+    # "Generate report", so the value the operator typed never appeared on the
+    # artefact (or in the reports list).
+    return builder.build(body.kind, body.filters or {}, user["username"],
+                         title=(body.title or "").strip() or None)
 
 
 @router.get("")

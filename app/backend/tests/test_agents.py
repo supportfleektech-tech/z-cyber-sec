@@ -27,7 +27,10 @@ def test_agent_crud_admin_only(client, seeded):
     assert r.status_code == 201
     r = client.post("/api/agents", json={"name": "bad-agent", "tools": ["rm -rf /"]})
     assert r.status_code == 400
-    aid = client.get("/api/agents", params={}).json()["items"][0]["id"]
+    # SEC-090: this used to PATCH an unrelated agent *rename*-style with a name
+    # that already existed; the name was silently dropped so it "passed". Update
+    # the agent it actually created, by its own identity.
+    aid = next(a["id"] for a in client.get("/api/agents").json()["items"] if a["name"] == "x-agent")
     r = client.patch(f"/api/agents/{aid}", json={"name": "x-agent", "tools": ["get_alerts"]})
     assert r.status_code == 200
     assert r.json()["tools"] == ["get_alerts"]
@@ -227,3 +230,40 @@ def test_agent_task_requires_permission(client, seeded):
     r = client.post("/api/agents/tasks", json={"agent_id": 1, "title": "Viewer task",
                                                "request": {"tool": "query_events", "args": {}}})
     assert r.status_code == 403
+
+
+def test_agent_rename_is_real_and_protected(client, seeded):
+    """SEC-090: `name` was required by the update model and then never written,
+    so a rename returned 200 and changed nothing. A real key backs the name
+    (policy decisions, audit actors, the automation runner's lookup), so renames
+    are applied, kept unique, and refused for the automation identity."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    agents = client.get("/api/agents").json()["items"]
+    target = next(a for a in agents if a["name"] == "opencode-repo")
+    automation = next(a for a in agents if a["name"] == "internal-automation")
+
+    body = {"name": "repo-scanner", "provider": target["provider"], "role": target["role"],
+            "tools": target["tools"], "adapter": target["adapter"]}
+    r = client.patch(f"/api/agents/{target['id']}", json=body)
+    assert r.status_code == 200 and r.json()["name"] == "repo-scanner"
+    names = {a["name"] for a in client.get("/api/agents").json()["items"]}
+    assert "repo-scanner" in names and "opencode-repo" not in names
+    detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'agent.updated' "
+                                         "ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert detail["renamed_from"] == "opencode-repo"
+
+    # onto a name that already exists -> 409, and nothing changes
+    r = client.patch(f"/api/agents/{target['id']}", json={**body, "name": "openclaw-ops"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "exists"
+    after = {a["id"]: a["name"] for a in client.get("/api/agents").json()["items"]}
+    assert after[target["id"]] == "repo-scanner"
+
+    # the automation runner resolves its agent by name -> that rename is refused
+    r = client.patch(f"/api/agents/{automation['id']}",
+                     json={"name": "internal-automation-v2", "tools": automation["tools"],
+                           "adapter": automation["adapter"]})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "rename_not_supported"
+    after = {a["id"]: a["name"] for a in client.get("/api/agents").json()["items"]}
+    assert after[automation["id"]] == "internal-automation"

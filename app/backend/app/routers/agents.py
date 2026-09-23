@@ -97,6 +97,24 @@ def update_agent(agent_id: int, body: AgentIn, conn: sqlite3.Connection = Depend
     a = db.one(conn, "SELECT * FROM agents WHERE id = ?", (agent_id,))
     if not a:
         raise HTTPException(404, {"code": "not_found"})
+    # SEC-090: `name` was required in the body and then dropped, so a rename
+    # returned 200 and changed nothing. The name is a real key here — policy
+    # decisions, audit actors and the automation runner all resolve the agent by
+    # name — so the one rename that would quietly break other subsystems is
+    # refused, and every other rename is actually applied (there is no delete
+    # route, so refusing all renames would make a typo permanent).
+    renamed_from = None
+    if body.name and body.name != a["name"]:
+        from .automation import AUTOMATION_AGENT_NAME
+        if a["name"] == AUTOMATION_AGENT_NAME:
+            raise HTTPException(409, {
+                "code": "rename_not_supported",
+                "message": f"{a['name']!r} is the identity the automation runner resolves by "
+                           f"name; renaming it would break playbook runs"})
+        if db.one(conn, "SELECT id FROM agents WHERE name = ? AND id <> ?", (body.name, agent_id)):
+            raise HTTPException(409, {"code": "exists",
+                                      "message": f"another agent is already named {body.name!r}"})
+        renamed_from = a["name"]
     bad = [t for t in body.tools if t not in policy.TOOL_REGISTRY]
     if bad:
         raise HTTPException(400, {"code": "unknown_tools", "message": f"unknown tools: {bad}"})
@@ -110,12 +128,14 @@ def update_agent(agent_id: int, body: AgentIn, conn: sqlite3.Connection = Depend
         raise HTTPException(400, {"code": "bad_persona",
                                   "message": f"persona must be one of {list(agent_adapters.PERSONAS)}"})
     conn.execute(
-        "UPDATE agents SET provider = ?, role = ?, scope = ?, tools = ?, adapter = ?, adapter_config = ?, updated_at = ? WHERE id = ?",
-        (body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools),
+        "UPDATE agents SET name = ?, provider = ?, role = ?, scope = ?, tools = ?, adapter = ?, "
+        "adapter_config = ?, updated_at = ? WHERE id = ?",
+        (body.name, body.provider, body.role, db.jdump(body.scope), db.jdump(body.tools),
          body.adapter, db.jdump(body.adapter_config), db.utcnow(), agent_id))
     conn.commit()
     record_audit(conn, _actor(user), "agent.updated", target_type="agent", target_id=str(agent_id),
-                 detail={"tools": body.tools, "adapter": body.adapter})
+                 detail={"tools": body.tools, "adapter": body.adapter,
+                         **({"renamed_from": renamed_from} if renamed_from else {})})
     return _decode_agent(db.one(conn, "SELECT * FROM agents WHERE id = ?", (agent_id,)))
 
 

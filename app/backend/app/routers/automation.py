@@ -89,20 +89,26 @@ def run_playbook(pb_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.
         (pb_id, "manual", "pending", now, None))
     run_id = int(cur.lastrowid)
 
+    # SEC-090: `note` was accepted and thrown away. It is the operator's "why"
+    # for this run — the same reasoning other decisions in this system are
+    # required to record — so it is kept on the run result and in the audit
+    # entry instead of being silently discarded.
     if body.dry_run:
         conn.execute("UPDATE playbook_runs SET status = 'completed', finished_at = ?, result = ? WHERE id = ?",
-                     (now, db.jdump({"dry_run": True, "plan": plan, "executed": False}), run_id))
+                     (now, db.jdump({"dry_run": True, "plan": plan, "executed": False,
+                                     "note": body.note}), run_id))
         conn.commit()
         record_audit(conn, _actor(user), "playbook.dry_run", target_type="playbook", target_id=str(pb_id),
-                     detail={"run_id": run_id})
-        return {"run_id": run_id, "dry_run": True, "plan": plan}
+                     detail={"run_id": run_id, "note": body.note})
+        return {"run_id": run_id, "dry_run": True, "plan": plan, "note": body.note}
 
     if plan["status"] == "denied":
         conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? WHERE id = ?",
-                     (now, db.jdump({"error": "denied", "reasons": plan["reasons"]}), run_id))
+                     (now, db.jdump({"error": "denied", "reasons": plan["reasons"],
+                                     "note": body.note}), run_id))
         conn.commit()
         record_audit(conn, _actor(user), "playbook.failed", target_type="playbook", target_id=str(pb_id),
-                     detail={"reasons": plan["reasons"][:5]})
+                     detail={"reasons": plan["reasons"][:5], "note": body.note})
         return {"run_id": run_id, "status": "denied", "reasons": plan["reasons"]}
 
     if plan["status"] == "awaiting_approval":
@@ -112,22 +118,23 @@ def run_playbook(pb_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.
                              "VALUES (?, ?, 'pending', ?, ?)",
                              (0, f"playbook:{pb['name']}:{step['tool']}", user["username"], now))
         conn.execute("UPDATE playbook_runs SET status = 'pending', result = ? WHERE id = ?",
-                     (db.jdump({"awaiting_approval": True, "plan": plan}), run_id))
+                     (db.jdump({"awaiting_approval": True, "plan": plan, "note": body.note}), run_id))
         conn.commit()
         record_audit(conn, _actor(user), "playbook.awaiting_approval", target_type="playbook",
-                     target_id=str(pb_id), detail={"run_id": run_id})
+                     target_id=str(pb_id), detail={"run_id": run_id, "note": body.note})
         return {"run_id": run_id, "status": "awaiting_approval", "reasons": plan["reasons"]}
 
     # Execute read-only steps.
     task = {"id": run_id, "request": db.jdump({"steps": plan["steps"]})}
     result = policy.execute_task(conn, task, agent)
+    result["note"] = body.note
     status = "completed" if not result.get("errors") else "failed"
     conn.execute("UPDATE playbook_runs SET status = ?, finished_at = ?, result = ? WHERE id = ?",
                  (status, db.utcnow(), db.jdump(result), run_id))
     conn.commit()
     record_audit(conn, _actor(user), f"playbook.{status}", target_type="playbook", target_id=str(pb_id),
-                 detail={"run_id": run_id, "errors": result.get("errors", [])[:5]})
-    return {"run_id": run_id, "status": status, "result": result}
+                 detail={"run_id": run_id, "errors": result.get("errors", [])[:5], "note": body.note})
+    return {"run_id": run_id, "status": status, "result": result, "note": body.note}
 
 
 @router.get("/runs")

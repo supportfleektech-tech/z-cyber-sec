@@ -96,11 +96,10 @@ export default function Cloud() {
                         className="small"
                         onChange={async (e) => {
                           try {
+                            // SEC-090: only the field being changed — the full
+                            // body used to be echoed back, and omitting `detail`
+                            // (as this payload did) wiped the finding's evidence.
                             await api.patch(`/api/cloud/posture/${p.id}`, {
-                              asset_id: p.asset_id,
-                              rule_id: p.rule_id,
-                              title: p.title,
-                              severity: p.severity,
                               status: e.target.value,
                             });
                             flashShow(`Posture ${p.rule_id} → ${e.target.value}`);

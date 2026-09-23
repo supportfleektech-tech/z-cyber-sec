@@ -94,22 +94,23 @@ class ReportBuilder:
 
     # ------------------------------------------------------------ report kinds
 
-    def build(self, kind: str, filters: dict, actor: str) -> dict:
+    def build(self, kind: str, filters: dict, actor: str, title: str | None = None) -> dict:
+        """Build a report. `title` overrides the generated one (SEC-090)."""
         if kind == "overview":
-            return self._overview(actor, filters)
+            return self._overview(actor, filters, title)
         if kind == "soc":
-            return self._soc(actor, filters)
+            return self._soc(actor, filters, title)
         if kind == "cases":
-            return self._cases(actor, filters)
+            return self._cases(actor, filters, title)
         if kind == "intel":
-            return self._intel(actor, filters)
+            return self._intel(actor, filters, title)
         if kind == "vulns":
-            return self._vulns(actor, filters)
+            return self._vulns(actor, filters, title)
         if kind == "tradecraft":
-            return self._tradecraft(actor, filters)
+            return self._tradecraft(actor, filters, title)
         raise ValueError(f"unknown report kind: {kind}")
 
-    def _tradecraft(self, actor, filters):
+    def _tradecraft(self, actor, filters, title=None):
         """Engagement deliverable (SEC-076).
 
         Two things make this different from a findings dump, and both are the
@@ -187,10 +188,10 @@ class ReportBuilder:
                      f"<table><tr><th>Finding</th><th>Title</th><th>Verdict</th><th>Why</th></tr>"
                      f"{rows}</table>")
 
-        title = "Tradecraft engagement report" + (f" ({verdict})" if verdict else "")
-        return self._write("tradecraft", title, actor, filters, body)
+        default_title = "Tradecraft engagement report" + (f" ({verdict})" if verdict else "")
+        return self._write("tradecraft", title or default_title, actor, filters, body)
 
-    def _overview(self, actor, filters):
+    def _overview(self, actor, filters, title=None):
         by_sev = db.q(self.conn, "SELECT severity, COUNT(*) c FROM alerts GROUP BY severity")
         by_status = db.q(self.conn, "SELECT status, COUNT(*) c FROM cases GROUP BY status")
         counts = {
@@ -203,9 +204,9 @@ class ReportBuilder:
         }
         body = _kv_table("Counts", counts) + _sev_table("Alerts by severity", by_sev) \
             + _kv_table("Cases by status", {r["status"]: r["c"] for r in by_status})
-        return self._write("overview", "CYBER-SEC Overview", actor, filters, body)
+        return self._write("overview", title or "CYBER-SEC Overview", actor, filters, body)
 
-    def _soc(self, actor, filters):
+    def _soc(self, actor, filters, title=None):
         sev = filters.get("severity")
         rows = db.q(self.conn,
                     "SELECT a.title, r.name AS rule, a.severity, a.status, a.count, a.first_seen, a.assigned_to "
@@ -213,32 +214,34 @@ class ReportBuilder:
                     + ("WHERE a.severity = ?" if sev else "") + " ORDER BY a.first_seen DESC LIMIT 200",
                     (sev,) if sev else ())
         body = _alerts_table("Alerts", rows)
-        return self._write("soc", f"SOC Alert Report{f' ({sev})' if sev else ''}", actor, filters, body)
+        return self._write("soc", title or f"SOC Alert Report{f' ({sev})' if sev else ''}",
+                           actor, filters, body)
 
-    def _cases(self, actor, filters):
+    def _cases(self, actor, filters, title=None):
         st = filters.get("status")
         rows = db.q(self.conn,
                     "SELECT number, title, status, priority, severity, assigned_to, created_at, closed_at "
                     "FROM cases" + (" WHERE status = ?" if st else "") + " ORDER BY created_at DESC LIMIT 200",
                     (st,) if st else ())
         body = _cases_table("Cases", rows)
-        return self._write("cases", f"Case Report{f' ({st})' if st else ''}", actor, filters, body)
+        return self._write("cases", title or f"Case Report{f' ({st})' if st else ''}",
+                           actor, filters, body)
 
-    def _intel(self, actor, filters):
+    def _intel(self, actor, filters, title=None):
         rows = db.q(self.conn,
                     "SELECT i.type, i.value, i.confidence, s.name AS source, i.status, i.mitre_tactics "
                     "FROM threat_indicators i LEFT JOIN intel_sources s ON s.id = i.source_id "
                     "ORDER BY i.confidence DESC LIMIT 200")
         body = _intel_table("Indicators", rows)
-        return self._write("intel", "Threat Intel Report", actor, filters, body)
+        return self._write("intel", title or "Threat Intel Report", actor, filters, body)
 
-    def _vulns(self, actor, filters):
+    def _vulns(self, actor, filters, title=None):
         rows = db.q(self.conn,
                     "SELECT v.cve_id, v.title, v.severity, v.status, v.cvss, a.name AS asset, v.due_date "
                     "FROM vuln_findings v LEFT JOIN assets a ON a.id = v.asset_id "
                     "ORDER BY v.cvss DESC LIMIT 200")
         body = _vulns_table("Vulnerabilities", rows)
-        return self._write("vulns", "Vulnerability Report", actor, filters, body)
+        return self._write("vulns", title or "Vulnerability Report", actor, filters, body)
 
 
 def _next_id(conn, table: str) -> int:

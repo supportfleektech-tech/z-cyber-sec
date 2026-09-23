@@ -113,17 +113,48 @@ def list_posture(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = D
     return db.paged(conn, sql, tuple(params), "ORDER BY p.id DESC", page, page_size)
 
 
+class PostureUpdateIn(BaseModel):
+    """Partial update (SEC-090).
+
+    The route used the create model — `asset_id`, `rule_id` and `title` were
+    *required* and then never written, while `detail` was, so the SPA's status
+    change (which sends `{asset_id, rule_id, title, status}`) silently wiped the
+    finding's evidence text. Live-verified: `detail: "cert expiry 2026-09-27."`
+    -> `None` on a 200 response.
+    """
+    asset_id: int | None = None
+    rule_id: str | None = Field(default=None, min_length=2, max_length=120)
+    title: str | None = Field(default=None, min_length=3, max_length=300)
+    severity: str | None = None
+    status: str | None = None
+    detail: str | None = Field(default=None, max_length=4000)
+    meta: dict | None = None
+
+
 @router.patch("/posture/{finding_id}")
-def update_posture(finding_id: int, body: PostureIn, conn: sqlite3.Connection = Depends(db.get_conn),
+def update_posture(finding_id: int, body: PostureUpdateIn, conn: sqlite3.Connection = Depends(db.get_conn),
                    user: dict = Depends(require("cloud.write"))):
-    _validate_posture(body.status, body.severity)
     p = db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (finding_id,))
     if not p:
         raise HTTPException(404, {"code": "not_found"})
-    conn.execute(
-        "UPDATE posture_findings SET status = ?, severity = ?, detail = ?, checked_at = ? WHERE id = ?",
-        (body.status, body.severity, body.detail, db.utcnow(), finding_id))
+    provided = body.model_fields_set
+    if not provided:
+        raise HTTPException(400, {"code": "no_changes", "message": "Send at least one field to update."})
+    _validate_posture(body.status if "status" in provided else p["status"],
+                      body.severity if "severity" in provided else p["severity"])
+    if "asset_id" in provided and not db.one(conn, "SELECT id FROM cloud_assets WHERE id = ?",
+                                              (body.asset_id,)):
+        raise HTTPException(400, {"code": "bad_asset", "message": "asset_id does not exist"})
+    columns = {"asset_id": body.asset_id, "rule_id": body.rule_id, "title": body.title,
+               "severity": body.severity, "status": body.status, "detail": body.detail,
+               "meta": db.jdump(body.meta)}
+    sets = [f"{c} = ?" for c in columns if c in provided]
+    params = [columns[c] for c in columns if c in provided]
+    conn.execute(f"UPDATE posture_findings SET {', '.join(sets)}, checked_at = ? WHERE id = ?",
+                 (*params, db.utcnow(), finding_id))
     conn.commit()
     record_audit(conn, _actor(user), "cloud.posture.updated", target_type="posture_finding",
-                 target_id=str(finding_id), detail={"status": body.status})
+                 target_id=str(finding_id),
+                 detail={"changed": sorted(provided),
+                         "status": p["status"] if "status" not in provided else body.status})
     return db.one(conn, "SELECT * FROM posture_findings WHERE id = ?", (finding_id,))

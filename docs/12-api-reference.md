@@ -117,6 +117,19 @@ is returned on every listed indicator (`null` = never expires).
   `expired_on_arrival`. Other STIX fields (`revoked`, granular markings) remain
   out of subset (ADR-004).
 
+**Silently-ignored request fields (SEC-090).** Three routes accepted input they
+never applied, now fixed: `POST /reports` honours `title` (the SPA offers a title
+box; the value used to be dropped and a generated title stored instead);
+`POST /automation/{id}/run` keeps `note` on the run result and in the audit entry
+for every outcome (dry-run, denied, awaiting-approval, executed); and PATCH
+handlers that took a create model — `PATCH /cloud/posture/{id}` — are now true
+partial updates (only the fields sent are written, omitted `detail` is preserved,
+`400 no_changes` on an empty body, `400 bad_asset` for an unknown asset).
+`PATCH /agents/{id}` and `PATCH /assets/{id}` now apply a rename for real
+(previously it returned 200 and kept the old name), with `409 exists` on a
+collision and `renamed_from` in the audit detail; renaming the automation agent
+is refused (`409 rename_not_supported`) because the runner resolves it by name.
+
 ### Vulnerabilities (`/api/vulns`)
 `GET/POST /` · `PATCH /{fid}` · `GET/POST /{fid}/exceptions` ·
 `GET/POST /{fid}/remediation` · `POST /import/csv` · `POST /import/json`.

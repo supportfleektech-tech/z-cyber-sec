@@ -220,3 +220,83 @@ def test_persona_agent_tools_are_gated_as_documented(client, seeded, conn):
         spec = policy.TOOL_REGISTRY[tool]
         if not spec["read_only"]:
             assert spec.get("text_fields"), f"{tool} is consequential and should declare prose fields"
+
+
+def test_posture_patch_is_partial_and_keeps_evidence(client, seeded):
+    """SEC-090: the posture PATCH used the *create* model — `asset_id`, `rule_id`
+    and `title` were required and never written, while `detail` was, so the SPA's
+    status change (which sends `{asset_id, rule_id, title, status}`) wiped the
+    finding's evidence text. Live-verified before the fix: `detail: "cert expiry
+    2026-09-27."` -> `None` on a 200."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    item = next(p for p in client.get("/api/cloud/posture").json()["items"] if p["detail"])
+
+    r = client.patch(f"/api/cloud/posture/{item['id']}", json={"status": "resolved"})
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["status"] == "resolved"
+    assert got["detail"] == item["detail"]          # evidence preserved
+    assert got["asset_id"] == item["asset_id"] and got["rule_id"] == item["rule_id"]
+    assert got["title"] == item["title"] and got["severity"] == item["severity"]
+
+    # the old payload shape (asset_id/rule_id/title sent, detail omitted) is fine too
+    r = client.patch(f"/api/cloud/posture/{item['id']}",
+                     json={"asset_id": item["asset_id"], "rule_id": item["rule_id"],
+                           "title": item["title"], "status": "open"})
+    assert r.status_code == 200 and r.json()["detail"] == item["detail"]
+
+    # empty body, bad enum, unknown asset and "title changed" are all explicit
+    assert client.patch(f"/api/cloud/posture/{item['id']}", json={}).status_code == 400
+    r = client.patch(f"/api/cloud/posture/{item['id']}", json={"status": "banana"})
+    assert r.status_code == 400
+    r = client.patch(f"/api/cloud/posture/{item['id']}", json={"asset_id": 99999})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_asset"
+    r = client.patch(f"/api/cloud/posture/{item['id']}", json={"title": "Renamed finding"})
+    assert r.status_code == 200 and r.json()["title"] == "Renamed finding"
+
+
+def test_report_title_from_the_request_is_used(client, seeded):
+    """SEC-090: `ReportIn.title` was accepted and dropped — the SPA offers a
+    title box, so what the operator typed never reached the artefact."""
+    from pathlib import Path
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    r = client.post("/api/reports", json={"kind": "overview", "title": "Q3 board summary"})
+    assert r.status_code == 201, r.text
+    rid = r.json()["id"]
+    row = next(i for i in client.get("/api/reports").json()["items"] if i["id"] == rid)
+    assert row["title"] == "Q3 board summary"
+    html = Path(row["path"]).read_text()
+    assert "Q3 board summary" in html
+    assert "<title>Q3 board summary" in html
+
+    # omitted title still gets the generated one
+    r = client.post("/api/reports", json={"kind": "overview"})
+    row = next(i for i in client.get("/api/reports").json()["items"] if i["id"] == r.json()["id"])
+    assert row["title"] == "CYBER-SEC Overview"
+
+    # a title with HTML is escaped in the artefact
+    r = client.post("/api/reports", json={"kind": "intel", "title": "<script>x</script>"})
+    row = next(i for i in client.get("/api/reports").json()["items"] if i["id"] == r.json()["id"])
+    html = Path(row["path"]).read_text()
+    assert "<script>x</script>" not in html and "&lt;script&gt;" in html
+
+
+def test_playbook_run_note_is_kept(client, seeded):
+    """SEC-090: `RunIn.note` was accepted and discarded — the operator's stated
+    reason for a run vanished (scheduler runs and approvals all keep theirs)."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    pb = client.get("/api/automation").json()["items"][0]
+
+    r = client.post(f"/api/automation/{pb['id']}/run",
+                    json={"dry_run": True, "note": "validating after rule change"})
+    assert r.status_code == 200, r.text
+    assert r.json()["note"] == "validating after rule change"
+    run = next(x for x in client.get("/api/automation/runs").json()["items"]
+               if x["id"] == r.json()["run_id"])
+    assert run["result"]["note"] == "validating after rule change"   # already decoded by the route
+    ev = dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'playbook.dry_run' "
+                         "ORDER BY seq DESC LIMIT 1")[0]
+    assert dbmod.jload(ev["detail"])["note"] == "validating after rule change"
