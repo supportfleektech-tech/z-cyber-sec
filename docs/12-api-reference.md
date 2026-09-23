@@ -96,6 +96,14 @@ subset) · `GET /indicators/correlate?window_hours=` (flat hit list) ·
 `GET/POST /` · `PATCH /{fid}` · `GET/POST /{fid}/exceptions` ·
 `GET/POST /{fid}/remediation` · `POST /import/csv` · `POST /import/json`.
 
+`PATCH /{fid}` accepts `new|triaged|in_progress|fixed` — **`accepted_risk` is not
+settable here** (SEC-082): accepting a risk is a decision with a rationale, an
+approver and an expiry, so it is recorded through
+`POST /{fid}/exceptions` (reason ≥10 chars). Sending `accepted_risk` to the
+PATCH returns `400 use_exception_endpoint`. `severity` is validated against
+`{critical, high, medium, low, info}` on create and import
+(`400 bad_severity`; unknown values are reported per row in the import result).
+
 ### AppSec (`/api/appsec`)
 `GET/POST /scan-runs` · `GET /findings` ·
 `POST /findings/{id}/suppress` · `POST /sarif` (SARIF import).

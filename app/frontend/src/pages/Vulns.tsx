@@ -19,6 +19,10 @@ interface Paged<T> {
 }
 
 const VULN_STATUSES = ["new", "triaged", "in_progress", "fixed", "accepted_risk"];
+// SEC-082: `accepted_risk` is not settable from the status dropdown — it is the
+// result of recording an exception (rationale + approver + expiry), which is the
+// form below. It stays in VULN_STATUSES so it can still be filtered for.
+const SETTABLE_STATUSES = ["new", "triaged", "in_progress", "fixed"];
 
 export default function Vulns() {
   const [status, setStatus] = useState("");
@@ -59,7 +63,7 @@ export default function Vulns() {
         </select>
         <select value={severity} onChange={(e) => { setSeverity(e.target.value); setPage(1); }}>
           <option value="">All severities</option>
-          {["critical", "high", "medium", "low"].map((s) => <option key={s}>{s}</option>)}
+          {["critical", "high", "medium", "low", "info"].map((s) => <option key={s}>{s}</option>)}
         </select>
         <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }} />
         <button
@@ -226,8 +230,11 @@ function VulnModal({ v, onClose, onFlash, onReload }: { v: Vuln; onClose: () => 
               }
             }}
           >
-            {VULN_STATUSES.map((s) => <option key={s}>{s}</option>)}
+            {SETTABLE_STATUSES.map((s) => <option key={s}>{s}</option>)}
           </select>
+          <span className="faint" style={{ marginLeft: 8 }}>
+            accept a risk by recording an exception below
+          </span>
         </div>
         <div className="k">Asset</div><div>{v.asset || "—"}</div>
         <div className="k">Discovered</div><div className="mono">{fmtTs(v.discovered_at)}</div>

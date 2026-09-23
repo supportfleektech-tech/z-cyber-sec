@@ -48,6 +48,7 @@ def _const(source: str, name: str) -> set[str]:
     ("Vulns.tsx", "VULN_STATUSES", vulns.STATUSES),
     ("Reports.tsx", "KINDS", set(reports.KINDS)),
     ("Admin.tsx", "ROLES", security.ROLES),
+    ("Vulns.tsx", "SETTABLE_STATUSES", vulns.PATCHABLE_STATUSES),
 ])
 def test_frontend_picker_matches_api(page, name, expected):
     offered = _const(_page(page), name)
@@ -61,7 +62,7 @@ def test_no_severity_drift():
     """Severity lists are inline in a few pickers; every value the API accepts
     must be offered, and no value it rejects may be."""
     expected = soc.SEVERITIES
-    for page in ("Soc.tsx", "Cloud.tsx"):
+    for page in ("Soc.tsx", "Cloud.tsx", "Vulns.tsx"):
         src = _page(page)
         for m in re.finditer(r'\[((?:\s*"(?:critical|high|medium|low|info|severe|minor)"\s*,?)+)\]', src):
             offered = set(re.findall(r'"([^"]+)"', m.group(1)))

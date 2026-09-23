@@ -647,7 +647,43 @@ in the audit detail.
 
 Suite 235 → **236 passed**, ruff clean, frontend green (291.02 kB / 81.20 kB).
 
-Suite: **236 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
+### SEC-082 — risk acceptance could be recorded without a reason
+
+**Same class as SEC-081, found by asking where else a judgement writes nothing.**
+The platform has a purpose-built record for accepting a finding's risk
+(`POST /api/vulns/{fid}/exceptions`: rationale ≥10 chars, `approved_by`,
+optional `expires_at`). But the generic status PATCH also accepted
+`status: "accepted_risk"`:
+
+```
+PATCH /api/vulns/1 {"status":"accepted_risk"}  ->  200, no reason,
+                                                   no approver, no expiry
+```
+
+One decision had two representations, and the second one recorded neither why
+nor until when — it also silently defeated the expiry reminder that makes an
+accepted risk revisitable. The UI offered `accepted_risk` in its status dropdown
+right next to the exception form that records the reasoning.
+
+Fixed:
+- `PATCH /api/vulns/{fid}` refuses `accepted_risk` with
+  `400 use_exception_endpoint`, naming the endpoint that captures the decision.
+  `PATCHABLE_STATUSES` is the settable set; the exception endpoint remains the
+  only path to `accepted_risk`.
+- The UI's status dropdown offers only settable statuses and points at the
+  exception form; `accepted_risk` stays in the filter list (filtering must
+  still work).
+- Finding `severity` is validated against
+  `{critical, high, medium, low, info}` on create and import — an imported
+  `severity: "banana"` used to be stored and counted in no view. CSV imports
+  report the rejection per row (`errors` + `error_sample`) rather than failing
+  the whole file. The UI's severity filter, which omitted `info`, now offers it.
+- `tests/test_enum_parity.py` covers the new settable-status list and the vuln
+  severity filter.
+
+Suite 236 → **239 passed**, ruff clean, frontend green (291.18 kB / 81.24 kB).
+
+Suite: **239 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
 the replaced fingerprint tests), ruff clean; frontend typecheck + build green
 (290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
 `/tradecraft`, and a "generate report" button wired to the deliverable.

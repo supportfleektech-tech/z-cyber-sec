@@ -20,6 +20,11 @@ from ..deps import require
 router = APIRouter(prefix="/api/vulns", tags=["vulns"])
 
 STATUSES = {"new", "triaged", "in_progress", "fixed", "accepted_risk"}
+SEVERITIES = {"critical", "high", "medium", "low", "info"}
+# `accepted_risk` is a risk acceptance, so it is not settable through the
+# generic status PATCH (SEC-082): it must go through the exception record,
+# which captures the rationale, the approver and an expiry.
+PATCHABLE_STATUSES = STATUSES - {"accepted_risk"}
 
 
 def _actor(user: dict) -> dict:
@@ -58,6 +63,10 @@ def _insert_finding(conn, f: dict) -> tuple[int, bool]:
     if asset and not db.one(conn, "SELECT id FROM assets WHERE id = ?", (asset,)):
         raise HTTPException(400, {"code": "bad_asset"})
     sev = f.get("severity") or severity_from_cvss(f.get("cvss"))
+    # SEC-082: severity is a finding's triage input, not free text — an imported
+    # `severity: "banana"` used to be stored and then counted nowhere.
+    if sev is not None and sev not in SEVERITIES:
+        raise HTTPException(400, {"code": "bad_severity", "allowed": sorted(SEVERITIES)})
     existing = db.one(conn, "SELECT id FROM vuln_findings WHERE asset_id IS ? AND cve_id IS ? AND title = ?",
                       (asset, f.get("cve_id"), f["title"]))
     if existing:
@@ -170,6 +179,15 @@ def update_finding(fid: int, body: FindingUpdate, conn: sqlite3.Connection = Dep
         raise HTTPException(404, {"code": "not_found"})
     if body.status and body.status not in STATUSES:
         raise HTTPException(400, {"code": "bad_status"})
+    # SEC-082: accepting a finding's risk is a documented decision with an
+    # approver, a rationale and an expiry (POST /{fid}/exceptions). Setting the
+    # status directly recorded none of them, so the same decision had two
+    # representations, one of them without a reason or an end date.
+    if body.status == "accepted_risk":
+        raise HTTPException(400, {"code": "use_exception_endpoint",
+                                  "message": ("risk acceptance is recorded as an exception — "
+                                              "POST /api/vulns/{id}/exceptions with a reason "
+                                              "(and an expiry where possible)")})
     fields, params = [], []
     for k in ("status", "exploitability", "due_date"):
         if getattr(body, k) is not None:

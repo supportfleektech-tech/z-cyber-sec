@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 
+from app import db
+
 CSV = """asset,cve,title,cvss,severity,status
 lab-web-01,CVE-2026-10001,CSV imported vuln,7.2,high,new
 lab-db-01,,No CVE finding,4.5,,new
@@ -86,3 +88,39 @@ def test_filters(client, seeded):
     assert all(v["status"] == "fixed" for v in r.json()["items"])
     r = client.get("/api/vulns", params={"severity": "critical"})
     assert all(v["severity"] == "critical" for v in r.json()["items"])
+
+
+def test_risk_acceptance_must_be_recorded_as_an_exception(client, seeded, conn):
+    """SEC-082: `accepted_risk` via the status PATCH skipped the exception
+    record — no rationale, no approver, no expiry. One decision, one record."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    r = client.patch("/api/vulns/1", json={"status": "accepted_risk"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "use_exception_endpoint"
+    assert db.one(conn, "SELECT status FROM vuln_findings WHERE id=1")["status"] != "accepted_risk"
+
+    r = client.post("/api/vulns/1/exceptions", json={"reason": "compensating control on the WAF"})
+    assert r.status_code == 201
+    assert db.one(conn, "SELECT status FROM vuln_findings WHERE id=1")["status"] == "accepted_risk"
+    exc = db.one(conn, "SELECT * FROM finding_exceptions WHERE vuln_id=1 ORDER BY id DESC LIMIT 1")
+    assert exc["approved_by"] == "admin" and "compensating control" in exc["reason"]
+
+
+def test_finding_severity_is_validated(client, seeded, conn):
+    """An imported severity of "banana" used to be stored and counted nowhere."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    r = client.post("/api/vulns", json={"title": "Bad severity finding", "severity": "banana"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_severity"
+    r = client.post("/api/vulns", json={"title": "Info finding", "cvss": 0.0})
+    assert r.status_code == 201
+    assert db.one(conn, "SELECT severity FROM vuln_findings WHERE id=?",
+                  (r.json()["id"],))["severity"] == "info"              # derived, and valid
+
+    csv = ("asset,cve,title,cvss,severity\n"
+           "lab-web-01,CVE-2021-44228,Good row,9.8,\n"
+           "lab-web-01,,Bad row,3.0,banana\n")
+    r = client.post("/api/vulns/import/csv", files={"file": ("f.csv", io.BytesIO(csv.encode()), "text/csv")})
+    body = r.json()
+    assert body["created"] == 1 and body["errors"] == 1
+    assert "bad_severity" in body["error_sample"][0]
+    assert db.one(conn, "SELECT severity FROM vuln_findings WHERE title='Bad row'") is None
