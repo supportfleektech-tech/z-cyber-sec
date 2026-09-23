@@ -204,7 +204,33 @@ are safe; at-most-once-per-interval by design.
 Append-only, hash-chained (each row hash covers `seq, ts, actor, action,
 target, detail` + previous row's hash). No update/delete API. Actor is
 typed (`user`, `agent`, `system`) with name; every state-changing call
-records one. `GET /api/admin/audit/verify` re-walks the chain.
+records one.
+
+`GET /api/admin/audit/verify` re-walks the chain **and compares against the
+anchor** (SEC-084), returning `{ok, rows, first_bad_seq, reason, anchor}` where
+`reason` is `linkage` (a row was changed or removed mid-log), `gap` (sequence
+numbers are not contiguous) or `truncated` (history the anchor recorded is gone,
+with `missing_rows`). `GET /api/admin/audit/anchor` returns the recorded head
+(`rows`, `head_seq`, `head_hash`) for off-platform export.
+
+**What the chain proves, and what it does not.** It detects modification or
+removal by anything that does not recompute the chain — a partial restore, an
+ad-hoc `DELETE`, a bug — and the anchor makes *deletion* detectable (a plain
+hash chain cannot see its own tail; before SEC-084 `DELETE FROM audit_events
+WHERE seq > N` left every remaining link valid and verify said `ok`):
+
+| Situation | Detected by |
+|---|---|
+| A row is modified mid-log | chain (`reason: linkage`) |
+| Rows are removed mid-log | chain (`linkage`/`gap`) |
+| The newest rows are deleted | anchor (`reason: truncated`, with `missing_rows`) |
+| Deleted, then the attacker keeps working | **only an exported anchor** — the in-DB anchor advances with legitimate appends and eventually moves past the gap (`GET /verify?head_seq=&head_hash=&rows=` reports `external.reason` `missing`/`replaced`/`truncated`) |
+| The database and the anchor are both rewritten | nothing local — the unkeyed hash can be recomputed |
+
+That last row is why the weekly runbook step exports the anchor somewhere the
+platform does not control: the copy is the control. A keyed HMAC chain (key held
+outside the database) is the natural next hardening — **Proposed**, not
+implemented.
 
 ## Error code catalogue (common)
 

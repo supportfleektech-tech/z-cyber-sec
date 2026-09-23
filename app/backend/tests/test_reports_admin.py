@@ -95,6 +95,82 @@ def test_audit_log_and_chain_verification(client, seeded, conn):
     r = client.get("/api/admin/audit/verify")
     assert r.json()["ok"] is False
     assert r.json()["first_bad_seq"] == 1
+    assert r.json()["reason"] == "linkage"
+
+
+def test_truncating_the_audit_log_is_detected(client, seeded, conn):
+    """SEC-084: a hash chain cannot see its own tail. Deleting the newest rows
+    used to leave every remaining link valid, so verify said ok for exactly the
+    tamper that erases the evidence of what someone just did."""
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    before = client.get("/api/admin/audit/verify").json()
+    assert before["ok"] is True and before["anchor"]["rows"] == before["rows"]
+
+    # delete the newest rows straight from the DB (the attacker's move)
+    conn.execute("DELETE FROM audit_events WHERE seq > (SELECT MAX(seq) - 2 FROM audit_events)")
+    conn.commit()
+
+    after = client.get("/api/admin/audit/verify").json()
+    assert after["ok"] is False
+    assert after["reason"] == "truncated"
+    assert after["anchor"]["rows"] == before["rows"]      # what history says existed
+    assert after["rows"] < before["rows"]
+
+    # ...and the export endpoint reports both sides
+    r = client.get("/api/admin/audit/anchor")
+    assert r.status_code == 200
+    assert r.json()["verify"]["ok"] is False
+    assert r.json()["anchor"]["rows"] == before["rows"]
+
+
+def test_truncation_cannot_be_healed_by_later_activity(client, seeded, conn):
+    """The anchor must not be re-blessed by later activity: first the count
+    watermark, then the (seq, hash) pin — an attacker who deletes rows can
+    otherwise replenish the count with fresh events and make verify say ok."""
+    from app.audit import record_audit
+
+    actor = {"type": "user", "id": "1", "name": "admin"}
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    before = client.get("/api/admin/audit/anchor").json()["anchor"]
+    conn.execute("DELETE FROM audit_events WHERE seq > (SELECT MAX(seq) - 2 FROM audit_events)")
+    conn.commit()
+
+    # one new event: the count is still short of the watermark
+    record_audit(conn, actor, "test.after_truncation")
+    v = client.get("/api/admin/audit/verify").json()
+    assert v["ok"] is False and v["reason"] == "truncated"
+    assert v["anchor"]["rows"] == before["rows"]           # watermark held
+    assert v["missing_rows"] >= 1
+
+    # Replenish until the count AND the anchored seq are reached again. The
+    # in-DB anchor advances with legitimate appends, so once enough new events
+    # land it can no longer see the gap — that is the documented limit of a
+    # local anchor. An anchor exported BEFORE the deletion still catches it,
+    # because seq numbers are reused and the row at that seq now hashes
+    # differently.
+    for i in range(6):
+        record_audit(conn, actor, f"test.launder{i}")
+
+    r = client.get("/api/admin/audit/verify", params={
+        "head_seq": before["head_seq"], "head_hash": before["head_hash"], "rows": before["rows"]})
+    ext = r.json()["external"]
+    assert ext["ok"] is False, "an exported anchor must still detect the erased history"
+    assert ext["reason"] in ("missing", "replaced", "truncated")
+
+
+def test_newest_rows_are_anchored_as_they_are_written(client, seeded, conn):
+    """The anchor must track appends, or truncation after the last anchor is
+    invisible again."""
+    from app.audit import record_audit
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    a1 = client.get("/api/admin/audit/anchor").json()["anchor"]
+    record_audit(conn, {"type": "user", "id": "1", "name": "admin"}, "test.anchor_probe")
+    a2 = client.get("/api/admin/audit/anchor").json()["anchor"]
+    assert a2["rows"] == a1["rows"] + 1 and a2["head_hash"] != a1["head_hash"]
+    # and the anchor does not live somewhere an admin can overwrite via the API
+    r = client.get("/api/admin/settings")
+    assert all(s["key"] != "audit.anchor" for s in r.json()["items"])
 
 
 def test_backup_and_restore_roundtrip(client, seeded, conn):

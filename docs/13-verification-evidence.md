@@ -742,7 +742,87 @@ asserts the terminal states are sinks).
 
 Suite 239 → **247 passed**, ruff clean, frontend green (291.98 kB / 81.46 kB).
 
-**Current totals:** **247 tests pass** (`pytest -q`, ~3 min), ruff clean,
+### SEC-084 — the audit log could not see its own tail (deletion was invisible)
+
+**Found by testing the tamper-evidence claim instead of trusting it.** The audit
+log is hash-chained and the module docstring said "any modification of history is
+detectable". Modification, yes; **deletion of the newest rows, no** — a hash
+chain has nothing after the tail to notice that the tail is gone:
+
+```
+clean chain            {'ok': True,  'rows': 5}
+middle row modified    {'ok': False, 'rows': 5, 'first_bad_seq': 3}   # control: detected
+rebuilt clean          {'ok': True,  'rows': 5}
+TAIL truncated (seq>3) {'ok': True,  'rows': 3}    # rows 4 and 5 erased
+```
+
+A single `DELETE FROM audit_events WHERE seq > N` therefore removed the evidence
+of what someone had just done, and `GET /api/admin/audit/verify` confirmed the
+log was intact. The rows most worth deleting are the most recent ones.
+
+Fixed:
+
+- **`audit_anchor`** (migration `0005_audit_anchor.sql`) records how much history
+  exists — `rows`, `head_seq`, `head_hash` — updated in the same transaction as
+  every append. Deliberately its own table, not `settings`: that table has a
+  generic admin write endpoint, and an anchor an admin can rewrite proves
+  nothing.
+- The watermark is **monotonic** (`MAX(existing, actual)`). This mattered: the
+  first version of the fix let an attacker delete rows and then perform any
+  audited action, which re-blessed the shorter log and returned `ok: true`
+  again — caught while verifying the fix, and now a regression test.
+- `verify_chain()` returns a `reason` — `linkage`, `gap` or `truncated` (with
+  `missing_rows`) — so an operator knows *which* question failed. A log written
+  before anchoring existed reports `ok: true` with `reason: "unanchored"` and a
+  warning rather than a false alarm.
+- `GET /api/admin/audit/anchor` exports the anchor for off-platform archiving,
+  and the weekly runbook step records it (docs/10).
+
+**Two further holes were found while verifying this fix — both by trying to
+launder a truncation rather than by reading the code:**
+
+1. A count-only watermark was healed by later activity: deleting rows and then
+   doing anything audited re-blessed the shorter log (`ok: true` again).
+2. With the count fixed, an attacker who appended until the reused sequence
+   number reached the anchored one had the anchor adopt *their* hash — the
+   comparison needs to be strictly greater, so an append never re-points the
+   anchor at a different event.
+
+After both fixes, the boundary is explicit: a local anchor catches truncation
+while no activity has moved past the gap, and **an anchor exported earlier
+catches the rest** — sequence numbers are reused, so the row at the anchored
+`head_seq` hashes differently, and `GET /api/admin/audit/verify?head_seq=&head_hash=&rows=`
+reports `external.reason: replaced`. Verified end-to-end:
+
+```
+exported anchor {'rows': 5, 'head_seq': 5}
+clean                           ok: True
+naive truncation                ok: False, truncated, missing_rows 2
+after the attacker keeps working  local: ok: True   <- in-DB anchor moved on
+                                  exported anchor: replaced (seq 5 hashes differently)
+```
+
+Remaining honest limit (documented in docs/12, not implied away): the hash
+function is unkeyed, so an attacker who can rewrite the database *and* the
+anchor can recompute everything; only the externally kept copy is out of their
+reach — which is why the weekly runbook step exports it and now shows how to
+check against it. A keyed HMAC chain is **Proposed**, not implemented.
+
+Verified directly against the service (clean temp DB):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | clean chain | `ok: true`, anchor rows 5 |
+| 2 | middle row modified | `ok: false`, `reason: linkage`, `first_bad_seq: 3` |
+| 3 | tail truncated | `ok: false`, `reason: truncated`, `missing_rows: 2` |
+| 4 | audited activity *after* truncation | still `ok: false` (watermark held at 5) |
+| 5 | anchor after a normal append | `rows +1`, new head hash |
+| 6 | anchor not reachable via the settings API | verified in test |
+
+Suite 247 → **250 passed** (3 new: truncation detected, healing/laundering
+prevented, anchor tracks appends), ruff clean.
+
+**Current totals:** **250 tests pass** (`pytest -q`, ~3 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (291.98 kB / 81.46 kB gzip), CI green on every push. Every fix in the SEC-073 →
 SEC-083 series was reproduced first (as a failing check or a live request) and

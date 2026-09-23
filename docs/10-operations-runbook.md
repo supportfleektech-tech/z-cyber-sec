@@ -25,6 +25,20 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
   allowlists (`GET /api/agents`).
 - Supply chain: review CI runs — gitleaks findings, `pip-audit`/`npm audit`
   output, SBOM artifact diff.
+- Audit anchor: `GET /api/admin/audit/verify` must be `ok: true` (a
+  `truncated`/`linkage`/`gap` reason is an incident, not a warning), and record
+  `GET /api/admin/audit/anchor` somewhere the platform does not control — a
+  ticket, a log shipper, a signed commit, a dated paper log. That external copy
+  is what makes the log tamper-evident against someone who can rewrite the
+  database and recompute the chain (SEC-084); the in-DB anchor alone only
+  catches tampering that does not bother to update it. To *use* an earlier
+  export, check the log against it:
+  ```bash
+  curl -s -b cookies.txt "http://127.0.0.1:8080/api/admin/audit/verify\
+  ?head_seq=<seq>&head_hash=<hash>&rows=<rows>" | jq .external
+  ```
+  `external.ok: false` means the log no longer contains the event that anchor
+  recorded — treat it as tamper, not drift.
 - Retention: `GET /api/admin/retention/report` — review `due_for_review`
   (report only; any deletion is a human, audited act, ADR-005).
 - Coverage: `GET /api/soc/rules/coverage` — new `gaps` = active rules that

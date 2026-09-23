@@ -169,9 +169,34 @@ def list_audit(conn: sqlite3.Connection = Depends(db.get_conn),
 
 @router.get("/audit/verify")
 def verify(conn: sqlite3.Connection = Depends(db.get_conn),
-           user: dict = Depends(require("audit.read"))):
-    """Integrity check of the hash chain (tamper evidence)."""
-    return verify_chain(conn)
+           user: dict = Depends(require("audit.read")),
+           head_seq: int | None = None, head_hash: str | None = None,
+           rows: int | None = None):
+    """Integrity check of the hash chain + anchor (tamper evidence, SEC-084).
+
+    Pass the values from a previously exported anchor (`head_seq`, `head_hash`,
+    optional `rows`) to check the log against that copy — the in-DB anchor moves
+    forward with new events, so deleted history eventually becomes invisible to
+    it, while an anchor kept elsewhere still claims the event that is gone.
+    """
+    against = None
+    if head_seq is not None or head_hash is not None:
+        against = {"head_seq": head_seq, "head_hash": head_hash, "rows": rows}
+    return verify_chain(conn, against=against)
+
+
+@router.get("/audit/anchor")
+def get_anchor(conn: sqlite3.Connection = Depends(db.get_conn),
+               user: dict = Depends(require("audit.read"))):
+    """The recorded head of the audit log — export this off-platform (SEC-084).
+
+    Comparing an exported anchor against `GET /audit/verify` is what makes the
+    log tamper-evident against an attacker who can rewrite the whole database,
+    including the anchor itself: the copy kept outside the platform is the one
+    they cannot reach. See docs/10-operations-runbook.md (Weekly).
+    """
+    from ..audit import anchor as read_anchor
+    return {"anchor": read_anchor(conn), "verify": verify_chain(conn)}
 
 
 # -------------------------------------------------------------------- backup
