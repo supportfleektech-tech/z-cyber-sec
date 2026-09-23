@@ -81,7 +81,10 @@ def test_exercise_authorization_gate(client, seeded):
     assert r.status_code == 200
     ex_full = client.get(f"/api/exercises/{ex['id']}").json()
     assert ex_full["runs"]
-    r = client.patch(f"/api/exercises/{ex['id']}", json={"status": "completed", "reason": "done"})
+    # SEC-083: closing an engagement records its outcome, so the reason is a
+    # real sentence rather than a placeholder ("done" no longer passes).
+    r = client.patch(f"/api/exercises/{ex['id']}",
+                     json={"status": "completed", "reason": "synthetic range cleaned up; exercise closed"})
     assert r.status_code == 200
     ex_full = client.get(f"/api/exercises/{ex['id']}").json()
     assert ex_full["runs"][0]["result"] == "completed"

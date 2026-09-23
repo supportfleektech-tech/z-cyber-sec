@@ -118,10 +118,24 @@ PATCH returns `400 use_exception_endpoint`. `severity` is validated against
 `PATCH /risks/{risk_id}` (status/owner/likelihood/impact/mitigations;
 `score = likelihood × impact` recomputed server-side).
 
-### Exercises (`/api/exercises`)
-`GET/POST /` · `GET/PATCH /{ex_id}` — authorized exercise lifecycle
-(planned→authorized→running→completed, reason required to complete;
-never initiates network action — threat model).
+### Exercises (`/api/exercises`) — the engagement lifecycle
+
+`planned → authorized → running → completed`, with `aborted` as the early exit
+available from `planned`, `authorized` or `running`. **The lifecycle is one-way
+(SEC-083):** anything else is `409 illegal_transition` with `from`, `to` and the
+`allowed` set. There is deliberately no "revert to planned" — that would withdraw
+the authority the scope guard reads, and `aborted`/`completed` are terminal so a
+closed engagement cannot be quietly reopened. A refused transition is written to
+the audit log as `exercise.transition_denied`.
+
+Closing an engagement (`completed` or `aborted`) requires a `reason` of at least
+10 characters (`400 reason_required`) — it ends an authorization other people and
+processes depend on, and the reason is recorded on the `exercise_runs` row as
+well as in the audit trail. Re-sending the current status is a no-op (it does not
+start a second run).
+
+`GET/POST /` · `GET/PATCH /{ex_id}` — authorized exercise lifecycle. An exercise
+never initiates network action (threat model).
 
 ### Agents (`/api/agents`)
 | Method & path | Purpose |

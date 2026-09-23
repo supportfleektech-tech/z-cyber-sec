@@ -104,19 +104,29 @@ export function ConfirmButton({
   impact,
   onConfirm,
   danger,
+  disabled,
+  disabledReason,
 }: {
   label: string;
   confirmLabel: string;
   impact: string;
   onConfirm: () => Promise<void> | void;
   danger?: boolean;
+  /** Gate the action in the UI (e.g. a required reason is still missing). */
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
     <>
-      <button className={danger ? "danger small" : "small"} onClick={() => { setErr(null); setOpen(true); }}>
+      <button
+        className={danger ? "danger small" : "small"}
+        disabled={disabled}
+        title={disabled ? disabledReason : undefined}
+        onClick={() => { setErr(null); setOpen(true); }}
+      >
         {label}
       </button>
       {open && (

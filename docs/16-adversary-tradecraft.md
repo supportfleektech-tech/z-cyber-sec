@@ -49,6 +49,14 @@ work. Specifically:
 
 - **Deny by default.** No engagement ⇒ no authorized targets ⇒ every targeted
   action is refused.
+- **Authority cannot be withdrawn silently, nor restored silently.** The
+  engagement lifecycle is one-way (SEC-083): `running → planned` is refused with
+  `409 illegal_transition` (before the fix it was accepted, and an engagement's
+  live authorization simply evaporated mid-flight — its targets stopped being
+  authorized and in-flight tradecraft began failing as out-of-scope), and
+  `aborted`/`completed` are terminal, so an explicitly stopped engagement cannot
+  be reopened to `authorized` in one call. Closing requires a recorded reason.
+  Attempts to make those moves are written to the audit log.
 - **`planned` is not authorization.** An exercise that exists but has not been
   moved to `authorized` grants nothing (verified live: `lab-ctf-target-01`
   belongs to a *planned* CTF exercise and is correctly not in scope).

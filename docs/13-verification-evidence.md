@@ -683,10 +683,70 @@ Fixed:
 
 Suite 236 → **239 passed**, ruff clean, frontend green (291.18 kB / 81.24 kB).
 
-Suite: **239 passed** (191 + 21 new in `tests/test_hardening_followups.py` plus
-the replaced fingerprint tests), ruff clean; frontend typecheck + build green
-(290.07 kB / 80.89 kB gzip). Duplicate clusters have a UI panel on
-`/tradecraft`, and a "generate report" button wired to the deliverable.
+### SEC-083 — an engagement's lifecycle was not one-way (authority could be withdrawn or restored silently)
+
+**Found by auditing the state machine itself rather than the happy path.** The
+status of an exercise is not a label: it is the authority the scope guard reads,
+the trigger that opens a run, and the record of whether offensive work was ever
+permitted. The guard only prevented moving *forward* without authorization:
+
+```
+running  -> planned     : 200, no reason  (seeded engagement 1)
+  authorized targets: 2 -> 0     # live authorization evaporated mid-engagement
+aborted  -> authorized  : 200
+  authorized targets: 0 -> 2     # an explicitly stopped engagement was re-armed
+aborted (no reason)     : 200     # stopping early recorded no justification
+```
+
+Three consequences, all governance-relevant: in-flight tradecraft against a
+mission target starts being refused and audited as out-of-scope *attempts* while
+the engagement is still notionally live; a stopped engagement can be restored to
+full authority in one unremarked call; and a termination leaves no record of why
+it happened.
+
+Fixed (`app/routers/exercises.py`): an explicit `ALLOWED_TRANSITIONS` table makes
+the lifecycle one-way — `planned → {authorized, aborted}`,
+`authorized → {running, completed, aborted}`, `running → {completed, aborted}`,
+and `completed`/`aborted` are terminal. Anything else is
+`409 illegal_transition` carrying `from`, `to` and `allowed`, and the refusal is
+written to the audit log as `exercise.transition_denied` (a request to withdraw
+or reopen authority is a governance signal, like an out-of-scope targeting
+attempt). Closing an engagement requires a `reason` of ≥10 characters
+(`400 reason_required`), recorded on the `exercise_runs` row and in the audit
+trail. Re-sending the current status is now a no-op instead of starting a second
+`exercise_runs` row.
+
+The UI mirrored the same gap in the other direction: its Complete button showed
+a "reason required" box that it never enforced and sent `reason: undefined`, and
+there was no way to abort an engagement at all. `StatusAdvance` now enforces the
+10-character minimum (both buttons disabled with an explanation via a new
+`disabled`/`disabledReason` on `ConfirmButton`) and offers **Abort** as a
+danger-styled action.
+
+Verified live on the seeded engagement:
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | `authorized → running` | `200`, 2 targets authorized |
+| 2 | `running → planned` | `409 illegal_transition`, "lifecycle is one-way", `allowed: [aborted, completed]` |
+| 3 | authorized targets after the refusal | still **2** — authority preserved |
+| 4 | `aborted` without a reason | `400 reason_required` |
+| 5 | `aborted` with a reason | `200`; run row `result=aborted`, detail carries the reason; audit detail carries it too |
+| 6 | `aborted → authorized` | `409 illegal_transition`, `allowed: []` |
+| 7 | `planned → running` | still `409 not_authorized` (existing contract preserved) |
+| 8 | Re-sending `running` | no-op, one run row (was two) |
+
+Tests: `tests/test_exercise_lifecycle.py` (9 tests, including a table-level test
+that refuses any backwards transition except the sanctioned early exit and
+asserts the terminal states are sinks).
+
+Suite 239 → **247 passed**, ruff clean, frontend green (291.98 kB / 81.46 kB).
+
+**Current totals:** **247 tests pass** (`pytest -q`, ~3 min), ruff clean,
+`scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
+(291.98 kB / 81.46 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-083 series was reproduced first (as a failing check or a live request) and
+re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
 - **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and

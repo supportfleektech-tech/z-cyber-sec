@@ -22,6 +22,26 @@ router = APIRouter(prefix="/api/exercises", tags=["exercises"])
 STATUSES = ("planned", "authorized", "running", "completed", "aborted")
 ORDER = {s: i for i, s in enumerate(STATUSES)}
 
+# SEC-083: an engagement's lifecycle is one-way.
+#
+# The status is not a label — it is the authority the scope guard reads, the
+# trigger that starts a run, and the record of whether offensive work was ever
+# permitted. Before this table, `running -> planned` was accepted silently
+# (authorization evaporated mid-engagement: 2 authorized targets became 0, and
+# in-flight tradecraft started being refused and audited as out-of-scope
+# attempts) and `aborted -> authorized` was accepted too, quietly restoring the
+# authority of an engagement that had been explicitly stopped. Going forward
+# means a new engagement with its own authorization; it must never be a quiet
+# reversal of this one.
+ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    "planned": {"authorized", "aborted"},
+    "authorized": {"running", "completed", "aborted"},
+    "running": {"completed", "aborted"},
+    "completed": set(),
+    "aborted": set(),
+}
+TERMINAL_STATUSES = {"completed", "aborted"}
+
 
 def _actor(user: dict) -> dict:
     return {"type": "user", "id": str(user["user_id"]), "name": user["username"]}
@@ -93,13 +113,37 @@ def update_exercise(ex_id: int, body: ExerciseUpdate, conn: sqlite3.Connection =
     e = db.one(conn, "SELECT * FROM exercises WHERE id = ?", (ex_id,))
     if not e:
         raise HTTPException(404, {"code": "not_found"})
-    if body.status:
+    if body.status and body.status != e["status"]:
         if body.status not in STATUSES:
             raise HTTPException(400, {"code": "bad_status"})
         # Guard: cannot run or complete an exercise that is not authorized.
-        if ORDER.get(body.status, 0) >= ORDER["running"] and e["status"] not in {"authorized", "running"}:
+        if body.status in {"running", "completed"} and e["status"] == "planned":
             raise HTTPException(409, {"code": "not_authorized",
                                       "message": "Exercise must be in 'authorized' status before running."})
+        # SEC-083: no backwards or post-terminal moves (see ALLOWED_TRANSITIONS).
+        if body.status not in ALLOWED_TRANSITIONS[e["status"]]:
+            # Refusals are visible, like an out-of-scope targeting attempt: a
+            # request to withdraw an engagement's authority or reopen a closed
+            # one is a governance signal, not just a 409.
+            record_audit(conn, _actor(user), "exercise.transition_denied",
+                         target_type="exercise", target_id=str(ex_id),
+                         detail={"from": e["status"], "to": body.status,
+                                 "allowed": sorted(ALLOWED_TRANSITIONS[e["status"]])})
+            conn.commit()
+            raise HTTPException(409, {
+                "code": "illegal_transition",
+                "message": (f"an engagement's lifecycle is one-way: "
+                            f"{e['status']} -> {body.status} is not a valid transition"),
+                "from": e["status"], "to": body.status,
+                "allowed": sorted(ALLOWED_TRANSITIONS[e["status"]])})
+        # SEC-083: closing an engagement ends an authorization other people and
+        # processes depend on, so the closing reason is part of the record (the
+        # API previously accepted `aborted` with no reason at all).
+        if body.status in TERMINAL_STATUSES and len((body.reason or "").strip()) < 10:
+            raise HTTPException(400, {
+                "code": "reason_required",
+                "message": (f"'{body.status}' closes an engagement — record the outcome "
+                            "(at least 10 characters)")})
         if body.status == "running":
             cur = conn.execute(
                 "INSERT INTO exercise_runs (exercise_id, started_at, result, detail) VALUES (?, ?, 'running', ?)",

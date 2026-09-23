@@ -26,6 +26,13 @@ const FLOW: [string, string][] = [
   ["running", "Complete"],
 ];
 
+// SEC-083: mirrors ALLOWED_TRANSITIONS in routers/exercises.py. The lifecycle is
+// one-way — there is no "revert to planned" because that would withdraw the
+// authority the scope guard reads. Abort is the sanctioned early exit and it
+// records why.
+const REASON_MIN = 10;
+const ABORTABLE = ["planned", "authorized", "running"];
+
 export default function Exercises() {
   const [flash, flashShow] = useFlash();
   const [sel, setSel] = useState<Exercise | null>(null);
@@ -87,17 +94,19 @@ function StatusAdvance({ e, onDone }: { e: Exercise; onDone: () => void }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const action = FLOW.find(([from]) => from === e.status);
-  if (!action) return <span className="faint">—</span>;
-  const [from, label] = action;
+  if (!action && !ABORTABLE.includes(e.status)) return <span className="faint">closed</span>;
+  const [from, label] = action ?? [e.status, "—"];
   const to = from === "planned" ? "authorized" : from === "authorized" ? "running" : "completed";
   const needsReason = to === "completed";
+  const reasonOk = reason.trim().length >= REASON_MIN;
   return (
     <span className="row">
       <input
         value={reason}
         onChange={(ev) => setReason(ev.target.value)}
-        placeholder={needsReason ? "reason required" : undefined}
-        style={{ width: 130, display: needsReason ? "inline-block" : "none" }}
+        placeholder={`reason (min ${REASON_MIN} chars)`}
+        title={needsReason ? "the closing record of the engagement" : "optional here"}
+        style={{ width: 150, display: needsReason || ABORTABLE.includes(e.status) ? "inline-block" : "none" }}
       />
       <ConfirmButton
         label={label}
@@ -122,7 +131,29 @@ function StatusAdvance({ e, onDone }: { e: Exercise; onDone: () => void }) {
             setBusy(false);
           }
         }}
-      />
+        disabled={needsReason && !reasonOk}
+        disabledReason={`closing an engagement records why (min ${REASON_MIN} characters)`}
+      />{" "}
+      {ABORTABLE.includes(e.status) && (
+        <ConfirmButton
+          label="Abort"
+          confirmLabel={`Abort exercise "${e.name}"?`}
+          impact={`Exercise closes with result=aborted and stops authorizing tradecraft immediately. Reason: ${reason || "(required)"}`}
+          onConfirm={async () => {
+            setBusy(true);
+            try {
+              await api.patch(`/api/exercises/${e.id}`, { status: "aborted", reason });
+              setReason("");
+              onDone();
+            } finally {
+              setBusy(false);
+            }
+          }}
+          danger
+          disabled={busy || !reasonOk}
+          disabledReason={`aborting stops authorized activity and records why (min ${REASON_MIN} characters)`}
+        />
+      )}
     </span>
   );
 }
