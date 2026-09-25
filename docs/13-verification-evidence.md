@@ -843,20 +843,20 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 282 → **284 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 284 → **285 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
 an edited bundle is refused by the recorded hash, unknown provenance is reported and
 gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
-round-trips and verifies, and the seeded evidence points at a real file) and
-282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
-positives), ruff clean.
+round-trips and verifies, and the seeded evidence points at a real file) 282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
+positives) and 284 → 285 (1 new: STIX imports validate confidence and normalise
+timestamps), ruff clean.
 
-**Current totals:** **284 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **285 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.63 kB / 82.17 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-103 series was reproduced first (as a failing check or a live request) and
+SEC-104 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1413,3 +1413,34 @@ can never match, and a typo would survive review indefinitely.
 `summary.unmatched_field_uids: ["T-9999"]`, `misconfigured_rules: 1`, absent from
 `gaps`; no false positives — all six shipped rules `unmatched_fields: []` and a rule
 on `data.bytes_out`/bare `bytes_out` (carried by an ingested event) is unflagged.
+
+### SEC-104 — STIX imports bypassed the validation the manual path applies (fixed)
+
+Found by comparing the two ways into `threat_indicators`: the manual endpoint bounds
+`confidence` with `ge=0, le=100`, so what does the bundle importer do with the same
+field?
+
+**Was:** nothing — bundle values went straight into the store. Live repro on the demo
+database: `confidence: 999` was stored as 999 and `confidence: "high"` was stored as
+**text**, after which `ORDER BY confidence DESC` ranked the string above every real
+score (`['high', 999, 85, …]`), so a bogus value became the "most confident" indicator
+in the listing and in correlation ordering. Separately, a spec-valid STIX timestamp
+with milliseconds (`2027-09-01T00:00:00.000Z`) was stored verbatim; the store's
+parsers read whole seconds, so `_stix_window` could not read it and the indicator got
+`ttl_hours: None` — the bundle's explicit `valid_until` silently became "never
+expires", and `first_seen` violated the column's documented format.
+
+**Fixed:** `parse_bundle` validates and normalises before anything is written, naming
+the offending object: `confidence` must be an integer 0-100 (booleans excluded), and
+`valid_from`/`valid_until` must be RFC3339 — fractional seconds and offsets are
+accepted and normalised to `%Y-%m-%dT%H:%M:%SZ` in UTC. A bad value is `400 bad_stix`
+with the reason, and because parsing happens before any DB write nothing is partially
+imported. Objects whose pattern this subset does not support are still ignored rather
+than judged (their timestamps are irrelevant), and an absent `confidence` still falls
+back to `default_confidence`.
+
+**Live (after fix):** `"high"` → `400 indicator 0: confidence must be an integer
+0-100, got 'high'`; `999` → same; the fractional-time bundle → `first_seen
+2026-09-01T00:00:00Z`, `ttl_hours 8760`, `active`; `"next tuesday"` → `400 indicator 0
+valid_until: not an RFC3339 timestamp`; confidence ordering all integers; a `mutex`
+object with nonsense confidence → ignored, `created: 0`.

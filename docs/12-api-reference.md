@@ -262,6 +262,18 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## STIX import
+
+`POST /api/intel/indicators/stix` accepts a STIX 2.1 bundle (subset parser: ip,
+domain, url, sha256, file name, email patterns). Values are validated before anything
+is written and the offending object is named in `400 bad_stix`: `confidence` must be
+an integer 0-100, and `valid_from`/`valid_until` must be RFC3339 (fractional seconds
+and offsets are normalised to UTC whole seconds, which is what the store's columns and
+TTL logic use). Since SEC-104 an out-of-range or text confidence is refused instead of
+being stored (a text value sorted above every real score), and a millisecond-precision
+`valid_until` produces a real TTL instead of "never expires". Objects whose pattern
+this subset does not support are ignored.
+
 ## Detection rule health
 
 `GET /api/soc/rules` reports per rule whether it compiles (SEC-074: a rule that

@@ -270,3 +270,59 @@ def test_spa_sends_mitre_as_a_list_and_renders_it(client, seeded):
     assert r.status_code == 201 and r.json()["mitre_tactics"] == ["T1041", "T1110"]
     got = client.get("/api/intel/indicators", params={"q": "198.51.100.10"}).json()["items"][0]
     assert got["mitre_tactics"] == ["T1041", "T1110"]
+
+
+def test_stix_import_validates_confidence_and_normalises_timestamps(client, seeded, conn):
+    """SEC-104: values from a bundle went straight into the store. Live repro before
+    the fix: `confidence: 999` was stored 999 and `confidence: "high"` was stored as
+    TEXT (the manual endpoint bounds the same field 0-100 with `ge=0, le=100`), so
+    `ORDER BY confidence DESC` ranked the string above every real score; and a
+    spec-valid `valid_until` with milliseconds was stored verbatim, which the store's
+    parsers cannot read, so the indicator got `ttl_hours: None` and never expired."""
+    from app.services.stix import parse_bundle
+
+    def bundle(objects):
+        return {"type": "bundle", "objects": objects}
+
+    # A wrong-typed or out-of-range confidence is refused, naming the object.
+    r = client.post("/api/intel/indicators/stix", json={"bundle": bundle([
+        {"type": "indicator", "confidence": "high", "pattern": "[ipv4-addr:value = '198.51.100.21']"}])})
+    assert r.status_code == 400 and "confidence must be an integer 0-100" in r.json()["detail"]["message"]
+    r = client.post("/api/intel/indicators/stix", json={"bundle": bundle([
+        {"type": "indicator", "confidence": 999, "pattern": "[ipv4-addr:value = '198.51.100.22']"}])})
+    assert r.status_code == 400, r.text
+    # Nothing was written by the refused imports.
+    assert not conn.execute("SELECT id FROM threat_indicators WHERE value LIKE '198.51.100.2%'").fetchall()
+
+    # Fractional seconds are valid STIX and must still work — normalised, not dropped.
+    r = client.post("/api/intel/indicators/stix", json={"bundle": bundle([
+        {"type": "indicator", "name": "fractional", "confidence": 60,
+         "valid_from": "2026-09-01T00:00:00.000Z", "valid_until": "2027-09-01T00:00:00.000Z",
+         "pattern": "[ipv4-addr:value = '198.51.100.23']"}])})
+    assert r.status_code == 201, r.text
+    row = conn.execute("SELECT first_seen, ttl_hours, status, confidence FROM threat_indicators "
+                       "WHERE value = '198.51.100.23'").fetchone()
+    assert row["first_seen"] == "2026-09-01T00:00:00Z"      # store format, not the raw string
+    assert row["ttl_hours"] and row["ttl_hours"] > 8000     # ~a year, so it does expire
+    assert row["status"] == "active" and row["confidence"] == 60
+
+    # An offset timestamp normalises to UTC.
+    r = client.post("/api/intel/indicators/stix", json={"bundle": bundle([
+        {"type": "indicator", "valid_from": "2026-09-01T12:00:00+03:00",
+         "pattern": "[domain-name:value = 'offset.example']"}])})
+    assert r.status_code == 201, r.text
+    assert conn.execute("SELECT first_seen FROM threat_indicators WHERE value = 'offset.example'"
+                        ).fetchone()["first_seen"] == "2026-09-01T09:00:00Z"
+
+    # An unreadable timestamp is refused rather than stored as a string nobody can parse.
+    r = client.post("/api/intel/indicators/stix", json={"bundle": bundle([
+        {"type": "indicator", "valid_until": "next tuesday",
+         "pattern": "[ipv4-addr:value = '198.51.100.24']"}])})
+    assert r.status_code == 400 and "valid_until" in r.json()["detail"]["message"]
+
+    # Objects whose pattern we do not support contribute nothing and are not judged.
+    assert parse_bundle(bundle([{"type": "indicator", "confidence": "high",
+                                 "pattern": "[mutex:name = 'x']"}])) == []
+    # A missing confidence still falls back to the request default.
+    assert parse_bundle(bundle([{"type": "indicator",
+                                 "pattern": "[ipv4-addr:value = '198.51.100.25']"}]))[0]["confidence"] is None
