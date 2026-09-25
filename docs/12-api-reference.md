@@ -262,6 +262,18 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Detection rule health
+
+`GET /api/soc/rules` reports per rule whether it compiles (SEC-074: a rule that
+cannot compile is inert) and, since SEC-103, `unmatched_fields` — term fields that no
+ingested event carries, e.g. a typo (`user_name` for `user`). `GET
+/api/soc/rules/coverage` adds `misconfigured_rules`, `observed_event_fields` and
+`watching_unknown_fields`; a misconfigured rule is reported there instead of in
+`gaps`, because it needs a field fix, not more coverage. The field universe is
+derived from the newest 2000 events (columns plus nested `data.*` paths), so a field
+a source simply has not emitted yet is flagged too — the point is that the operator
+can see the rule cannot have matched anything ingested so far.
+
 ## Compliance evidence
 
 Control evidence (`POST /api/grc/controls/{id}/evidence`) is stored in the evidence

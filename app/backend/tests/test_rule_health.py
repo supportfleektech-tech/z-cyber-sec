@@ -215,3 +215,57 @@ def test_linter_reports_invalid_yaml(tmp_path, capsys):
     f.write_text("uid: [unclosed\n")
     assert main([str(f)]) == 1
     assert "invalid YAML" in capsys.readouterr().err
+
+
+# ------------------------------------------------------- SEC-103: dead-field rules
+
+def _create_rule(client, uid, detection, condition="sel"):
+    return client.post("/api/soc/rules", json={
+        "uid": uid, "name": f"Rule {uid}", "severity": "high", "status": "active",
+        "spec": {"detection": detection, "condition": condition}})
+
+
+def test_rule_watching_a_field_no_event_carries_is_reported(client, seeded):
+    """SEC-103: a typo'd field compiles, so `/rules` called the rule live and the
+    coverage report listed it as an ordinary "has not fired yet" gap — reading as a
+    detection gap rather than a misconfiguration. Live repro before the fix: a rule
+    on `user_name` (events carry `user`) showed `compiles: true, never_fired: true`
+    in `gaps`, with no field warning anywhere."""
+    r = _create_rule(client, "test-typo", {"sel": {"user_name": "root", "action": "ssh_failed_login"}})
+    assert r.status_code == 201, r.text
+
+    item = next(i for i in client.get("/api/soc/rules").json()["items"] if i["uid"] == "test-typo")
+    assert item["compiles"] is True                      # it compiles...
+    assert item["unmatched_fields"] == ["user_name"]     # ...but nothing carries the field
+    summary = client.get("/api/soc/rules").json()["summary"]
+    assert "test-typo" in summary["unmatched_field_uids"]
+
+    cov = client.get("/api/soc/rules/coverage").json()
+    assert cov["misconfigured_rules"] >= 1
+    entry = next(w for w in cov["watching_unknown_fields"] if w["uid"] == "test-typo")
+    assert entry["unmatched_fields"] == ["user_name"]
+    # It is reported as a misconfiguration, not as a coverage gap.
+    assert not any(g["uid"] == "test-typo" for g in cov["gaps"])
+    rule = next(x for x in cov["rules"] if x["uid"] == "test-typo")
+    assert rule["unmatched_fields"] == ["user_name"]
+
+
+def test_rules_reading_real_fields_are_not_flagged(client, seeded):
+    """No false positives: plain columns and `data.*` paths that an ingested event
+    carries stay unflagged, and a fired rule is never misconfigured."""
+    client.post("/api/soc/events", json={"events": [
+        {"ts": "2026-09-25T04:00:00Z", "source_name": "proxy", "host": "field-probe-01",
+         "user": "root", "action": "network_out", "outcome": "success", "severity": "low",
+         "msg": "probe", "data": {"bytes_out": 12345, "dst_ip": "203.0.113.9"}}]})
+    assert _create_rule(client, "test-columns", {"sel": {"user": "root", "action": "network_out"}}).status_code == 201
+    assert _create_rule(client, "test-datapath",
+                        {"sel": {"action": "network_out", "data.bytes_out": {"op": "gt", "value": 1}}}).status_code == 201
+    assert _create_rule(client, "test-databare",
+                        {"sel": {"bytes_out": {"op": "gt", "value": 1}}}).status_code == 201
+
+    cov = client.get("/api/soc/rules/coverage").json()
+    for uid in ("test-columns", "test-datapath", "test-databare"):
+        rule = next(x for x in cov["rules"] if x["uid"] == uid)
+        assert rule["unmatched_fields"] == [], f"{uid}: {rule}"
+    # The shipped rules watch real fields too.
+    assert all(x["unmatched_fields"] == [] for x in cov["rules"] if x["uid"].startswith("cs-"))

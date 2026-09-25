@@ -14,7 +14,14 @@ from pydantic import BaseModel, Field, field_validator
 from .. import db
 from ..audit import record_audit
 from ..deps import require
-from ..services.detection import RuleError, compile_rule, evaluate_batch, rule_health
+from ..services.detection import (
+    RuleError,
+    compile_rule,
+    evaluate_batch,
+    observed_event_fields,
+    rule_health,
+    unmatchable_fields,
+)
 
 log = logging.getLogger("cybersec.detection")
 
@@ -331,18 +338,26 @@ def list_rules(conn: sqlite3.Connection = Depends(db.get_conn), user: dict = Dep
     """
     rows = db.q(conn, "SELECT id, uid, name, description, severity, status, spec, updated_at "
                       "FROM detection_rules ORDER BY uid")
+    observed = observed_event_fields(db.q(
+        conn, "SELECT host, user, action, outcome, severity, source_name, source_type, data "
+              "FROM events ORDER BY id DESC LIMIT 2000"))
     items = []
     for r in rows:
-        health = rule_health(db.jload(r["spec"], {}) or {})
+        spec = db.jload(r["spec"], {}) or {}
+        health = rule_health(spec)
         r.pop("spec", None)
         r["compiles"] = health["compiles"]
         r["error"] = health["error"]
+        # SEC-103: the rule compiles, but does it watch anything events carry?
+        r["unmatched_fields"] = unmatchable_fields(spec, observed) if health["compiles"] else []
         items.append(r)
     broken = [i["uid"] for i in items if not i["compiles"]]
+    unknown = [i["uid"] for i in items if i["unmatched_fields"]]
     return {
         "items": items,
         "total": len(items),
-        "summary": {"ok": len(items) - len(broken), "broken": len(broken), "broken_uids": broken},
+        "summary": {"ok": len(items) - len(broken), "broken": len(broken), "broken_uids": broken,
+                    "unmatched_field_uids": unknown},
     }
 
 
@@ -410,9 +425,15 @@ def rule_dry_run(body: RuleDryRun, conn: sqlite3.Connection = Depends(db.get_con
 def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
                    user: dict = Depends(require("soc.read"))):
     rules = db.q(conn, "SELECT * FROM detection_rules ORDER BY uid")
+    # SEC-103: which fields do events actually carry? A rule reading a field nothing
+    # emits can never fire, and that is a misconfiguration, not a coverage gap.
+    observed = observed_event_fields(db.q(
+        conn, "SELECT host, user, action, outcome, severity, source_name, source_type, data "
+              "FROM events ORDER BY id DESC LIMIT 2000"))
     per_rule = []
     gaps = []
     broken_rules = []
+    misconfigured = []
     for r in rules:
         alert = db.one(conn,
             "SELECT COUNT(*) AS n, MAX(last_seen) AS last_seen FROM alerts WHERE rule_id = ?",
@@ -422,18 +443,28 @@ def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
         active = r["status"] == "active"
         never_fired = n == 0
         # SEC-074: distinguish "has not fired yet" from "can never fire".
-        health = rule_health(db.jload(r["spec"], {}) or {})
+        spec = db.jload(r["spec"], {}) or {}
+        health = rule_health(spec)
+        unknown_fields = unmatchable_fields(spec, observed) if health["compiles"] else []
         per_rule.append({
             "rule_id": r["id"], "uid": r["uid"], "name": r["name"],
             "severity": r["severity"], "status": r["status"],
             "alerts_total": n, "last_alert_at": last,
             "never_fired": never_fired,
             "compiles": health["compiles"], "error": health["error"],
+            "unmatched_fields": unknown_fields,
         })
         if not health["compiles"]:
             broken_rules.append({"uid": r["uid"], "name": r["name"],
                                  "severity": r["severity"], "status": r["status"],
                                  "error": health["error"]})
+        # SEC-103: a rule watching a field no event carries is misconfigured — it
+        # is reported apart from the gaps, because "add coverage" and "fix the
+        # field name" are different actions.
+        elif unknown_fields:
+            misconfigured.append({"uid": r["uid"], "name": r["name"], "status": r["status"],
+                                  "severity": r["severity"], "unmatched_fields": unknown_fields,
+                                  "alerts_total": n})
         # A broken rule is a configuration fault, not a coverage gap: it is
         # reported separately so the gap list stays actionable.
         elif active and never_fired:
@@ -447,10 +478,13 @@ def rules_coverage(conn: sqlite3.Connection = Depends(db.get_conn),
         "total_rules": len(rules),
         "active_rules": len(active_rules),
         "inert_rules": len(broken_rules),
+        "misconfigured_rules": len(misconfigured),
+        "observed_event_fields": len(observed),
         "fired_rules": len(fired),
         "coverage_pct": coverage_pct,
         "gaps": gaps,
         "broken_rules": broken_rules,
+        "watching_unknown_fields": misconfigured,
         "rules": per_rule,
     }
 

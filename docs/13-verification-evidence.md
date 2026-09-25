@@ -843,18 +843,20 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 280 → **282 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 282 → **284 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
 an edited bundle is refused by the recorded hash, unknown provenance is reported and
-gated, and the inventory lists bundles) and 280 → 282 (2 new: control evidence
-round-trips and verifies, and the seeded evidence points at a real file), ruff clean.
+gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
+round-trips and verifies, and the seeded evidence points at a real file) and
+282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
+positives), ruff clean.
 
-**Current totals:** **282 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **284 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(293.95 kB / 81.99 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-102 series was reproduced first (as a failing check or a live request) and
+(294.63 kB / 82.17 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-103 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1383,3 +1385,31 @@ bytes; listing `stored`, `missing: 0`; download 200 with identical bytes; swappe
 file → `500 integrity_mismatch` + `evidence.integrity_failure` audit; removed file →
 `410 missing` and `missing: 1`; seeded control evidence → `stored`,
 `digest_matches_file True` (was `synthetic…` with no path).
+
+### SEC-103 — a rule could look live while watching a field nothing carries (fixed)
+
+The follow-on from SEC-074. That fix made *non-compiling* rules visible; the
+coverage report then distinguished "broken" from "has not fired yet" — but a rule
+can compile perfectly and still be unable to fire.
+
+**Was:** a term field that no event resolves to (`user_name` where events carry
+`user`) makes `_get_field` return None, so the term is simply false. Live repro: a
+rule created with `detection: {ssh: {user_name: root, action: ssh_failed_login}}`
+reported `compiles: true, never_fired: true` and was listed under `gaps` — the same
+bucket as a rule that legitimately has not seen traffic — with nothing anywhere
+saying the field does not exist. An operator would add "coverage" for a rule that
+can never match, and a typo would survive review indefinitely.
+
+**Fixed:** `observed_event_fields()` derives the field universe actually ingested
+(columns plus nested `data.*` paths, sampled from the newest 2000 events) and
+`unmatchable_fields(spec, observed)` reports term fields the events never carry.
+`GET /rules` gains per-rule `unmatched_fields` plus `summary.unmatched_field_uids`;
+`GET /rules/coverage` gains `misconfigured_rules`, `observed_event_fields` and
+`watching_unknown_fields`, and such rules are listed there instead of in `gaps` —
+"fix the field name" and "add coverage" are different actions. The SOC SPA shows a
+`misconfigured` badge per rule and a warning block in the coverage panel.
+
+**Live (after fix):** the typo'd rule → `unmatched_fields: ["user_name"]`,
+`summary.unmatched_field_uids: ["T-9999"]`, `misconfigured_rules: 1`, absent from
+`gaps`; no false positives — all six shipped rules `unmatched_fields: []` and a rule
+on `data.bytes_out`/bare `bytes_out` (carried by an ingested event) is unflagged.

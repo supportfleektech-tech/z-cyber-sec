@@ -34,6 +34,8 @@ interface Rule {
   // SEC-074: false = stored but INERT (detection never fires it).
   compiles: boolean;
   error: string | null;
+  // SEC-103: fields this rule reads that no ingested event carries.
+  unmatched_fields?: string[];
 }
 interface Paged<T> {
   items: T[];
@@ -47,7 +49,11 @@ interface Coverage {
   coverage_pct: number;
   gaps: { uid: string; name: string; severity: string }[];
   broken_rules: { uid: string; name: string; severity: string; status: string; error: string | null }[];
-  rules: { uid: string; name: string; severity: string; status: string; alerts_total: number; last_alert_at: string | null; never_fired: boolean; compiles: boolean; error: string | null }[];
+  // SEC-103: a rule can compile and still never match — it may watch a field no
+  // event carries (a typo like `user_name` for `user`).
+  misconfigured_rules: number;
+  watching_unknown_fields: { uid: string; name: string; severity: string; status: string; unmatched_fields: string[]; alerts_total: number }[];
+  rules: { uid: string; name: string; severity: string; status: string; alerts_total: number; last_alert_at: string | null; never_fired: boolean; compiles: boolean; error: string | null; unmatched_fields: string[] }[];
 }
 interface Scenario {
   uid: string;
@@ -171,7 +177,14 @@ export default function Soc() {
                     <td><StBadge value={r.status} /></td>
                     <td>
                       {r.compiles
-                        ? <span className="st closed">live</span>
+                        ? (r.unmatched_fields?.length
+                            ? (
+                              <span className="st inert"
+                                title={`watches field(s) no event carries: ${r.unmatched_fields.join(", ")}`}>
+                                misconfigured
+                              </span>
+                            )
+                            : <span className="st closed">live</span>)
                         : <span className="st inert" title={r.error || undefined}>inert</span>}
                     </td>
                   </tr>
@@ -393,6 +406,20 @@ function CoveragePanel() {
                   {cov.data.broken_rules.map((b) => (
                     <li key={b.uid}>
                       <span className="mono">{b.uid}</span> — {b.error}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {cov.data.misconfigured_rules > 0 && (
+              <div className="inert-warn">
+                <strong>{cov.data.misconfigured_rules} rule(s) watch fields no event carries</strong> —
+                they compile, so they look live, but the term can never be true
+                (fix the field name or the emitter):
+                <ul style={{ margin: "6px 0 0 16px" }}>
+                  {cov.data.watching_unknown_fields.map((b) => (
+                    <li key={b.uid}>
+                      <span className="mono">{b.uid}</span> — {b.unmatched_fields.join(", ")}
                     </li>
                   ))}
                 </ul>

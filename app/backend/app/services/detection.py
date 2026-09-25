@@ -50,6 +50,61 @@ def rule_health(spec: dict) -> dict:
     return {"compiles": True, "error": None, "rule": rule}
 
 
+# --------------------------------------------------- field admissibility (SEC-103)
+
+# Columns every ingested event has (migration 0001). A rule term may read one of
+# these, or a path inside the JSON `data` payload.
+EVENT_COLUMNS = {"id", "ts", "source_type", "source_name", "host", "user", "action",
+                 "outcome", "severity", "msg", "data", "data_class", "created_at"}
+
+
+def observed_event_fields(events: list[dict]) -> set:
+    """Every field name (column or nested `data.*` path) an event set carries."""
+    fields = set()
+    for e in events:
+        fields.update(k for k in e if k in EVENT_COLUMNS)
+        data = e.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (ValueError, TypeError):
+                data = None
+        if isinstance(data, dict):
+            _add_paths(fields, data, "data")
+    return fields
+
+
+def _add_paths(out: set, node: dict, prefix: str) -> None:
+    for k, v in node.items():
+        path = f"{prefix}.{k}"
+        out.add(path)
+        out.add(k)  # `_get_field` also accepts the bare key for nested data
+        if isinstance(v, dict):
+            _add_paths(out, v, path)
+
+
+def unmatchable_fields(spec: dict, observed: set) -> list[str]:
+    """Fields a rule reads that no observed event carries (SEC-103).
+
+    A rule can compile perfectly and still be unable to fire — a typo'd field
+    (`user_name` for `user`) or a path nothing emits never resolves, and
+    `_get_field` answers None so the term is simply false. `rule_health` cannot see
+    this (it only compiles), and the coverage report listed such a rule as an
+    ordinary "has not fired yet" gap, which reads as a detection gap rather than a
+    misconfiguration. Returns the offending field names, deterministically ordered.
+    """
+    health = rule_health(spec)
+    if not health["compiles"]:
+        return []
+    bad = []
+    for fields in health["rule"].terms.values():
+        for field_name in fields:
+            base = field_name.split(".", 1)[0]
+            if field_name not in observed and base not in observed:
+                bad.append(field_name)
+    return sorted(set(bad))
+
+
 # --------------------------------------------------------------- condition parser
 
 _TOKEN_RE = re.compile(r"\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|of|all|any|not|and|or|\(|\))")
