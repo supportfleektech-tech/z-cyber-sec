@@ -91,3 +91,69 @@ def test_exercise_authorization_gate(client, seeded):
     # scope text is mandatory (min 20 chars)
     r = client.post("/api/exercises", json={"name": "No scope", "scope": "short"})
     assert r.status_code == 422
+
+
+def test_control_evidence_round_trips_and_verifies(client, seeded, conn):
+    """SEC-102: control evidence used to be hashed and thrown away — the row stored
+    `path = NULL`, so a control's "audit evidence" was a name, a digest and a
+    timestamp with no artifact behind it, and no route existed to download one.
+    Uploads now land in the evidence store and download verifies the digest."""
+    from pathlib import Path
+
+    from app import db as dbmod
+
+    r = client.post("/api/grc/controls", json={"framework": "SOC2", "code": "CC7.1",
+                                              "title": "Evidence round-trip"})
+    cid = r.json()["id"]
+    payload = b"control evidence body"
+    r = client.post(f"/api/grc/controls/{cid}/evidence",
+                    files={"file": ("policy.pdf", io.BytesIO(payload), "application/pdf")})
+    assert r.status_code == 201, r.text
+    ev = r.json()
+    assert ev["path"] and Path(ev["path"]).exists()      # the bytes are really stored
+    assert Path(ev["path"]).read_bytes() == payload
+
+    listing = client.get(f"/api/grc/controls/{cid}/evidence").json()
+    assert listing["total"] == 1 and listing["missing"] == 0
+    assert listing["items"][0]["storage"] == "stored"
+
+    # Download returns the artifact and audit-logs it.
+    dl = client.get(f"/api/grc/evidence/{ev['id']}/download")
+    assert dl.status_code == 200 and dl.content == payload
+
+    # A file swapped in the store is refused, and the refusal is recorded.
+    Path(ev["path"]).write_bytes(b"tampered")
+    bad = client.get(f"/api/grc/evidence/{ev['id']}/download")
+    assert bad.status_code == 500 and bad.json()["detail"]["code"] == "integrity_mismatch"
+    audit = dbmod.q(seeded, "SELECT action, detail FROM audit_events "
+                            "WHERE action = 'evidence.integrity_failure' ORDER BY seq DESC LIMIT 1")
+    assert audit and str(ev["id"]) in audit[0]["detail"]
+
+    # A row whose artifact is gone is reported as missing, not silently listed.
+    Path(ev["path"]).unlink()
+    assert client.get(f"/api/grc/evidence/{ev['id']}/download").status_code == 410
+    listing = client.get(f"/api/grc/controls/{cid}/evidence").json()
+    assert listing["missing"] == 1 and listing["items"][0]["storage"] == "missing"
+
+    # A row written before the fix (no path) cannot be downloaded and says so.
+    conn.execute("INSERT INTO audit_evidence (control_id, name, path, sha256, created_at) "
+                 "VALUES (?, 'legacy.pdf', NULL, 'synthetic', ?)", (cid, dbmod.utcnow()))
+    conn.commit()
+    legacy = dbmod.one(seeded, "SELECT id FROM audit_evidence WHERE name = 'legacy.pdf'")
+    r = client.get(f"/api/grc/evidence/{legacy['id']}/download")
+    assert r.status_code == 410 and r.json()["detail"]["code"] == "not_stored"
+    listing = client.get(f"/api/grc/controls/{cid}/evidence").json()
+    assert listing["missing"] == 2
+    assert {i["storage"] for i in listing["items"]} == {"missing", "not_stored"}
+
+
+def test_seeded_control_evidence_points_at_a_real_file(seeded):
+    """The demo used to seed a phantom: `path` NULL and the digest "synthetic" * 10.
+    A seeded control now has a real artifact whose digest matches the file."""
+    import hashlib
+    from pathlib import Path
+
+    row = seeded.execute("SELECT name, path, sha256 FROM audit_evidence ORDER BY id LIMIT 1").fetchone()
+    assert row["path"] and Path(row["path"]).exists()
+    assert row["sha256"] == hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest()
+    assert len(row["sha256"]) == 64

@@ -150,10 +150,13 @@ export default function Grc() {
 }
 
 function ControlEvidence({ c }: { c: Control }) {
-  const ev = useApi<{ items: { id: number; name: string; sha256: string; created_at: string }[] }>(
-    () => api.get(`/api/grc/controls/${c.id}/evidence`),
-    [c.id],
-  );
+  // SEC-102: evidence rows are downloadable now (the upload used to be hashed and
+  // discarded), and a row whose artifact is not in the store says so here rather
+  // than looking like satisfied control evidence.
+  const ev = useApi<{
+    items: { id: number; name: string; sha256: string; created_at: string; storage: string }[];
+    missing: number;
+  }>(() => api.get(`/api/grc/controls/${c.id}/evidence`), [c.id]);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   return (
@@ -179,8 +182,21 @@ function ControlEvidence({ c }: { c: Control }) {
         {busy ? "Uploading…" : `Attach (${ev.data?.items.length || 0})`}
       </button>
       {ev.data?.items.slice(0, 3).map((e) => (
-        <span key={e.id} className="faint" title={`${e.sha256}\n${fmtTs(e.created_at)}`}>{e.name}</span>
+        <span key={e.id} className="faint" title={`${e.sha256}\n${fmtTs(e.created_at)}`}>
+          {e.storage === "stored" ? (
+            <a href={`/api/grc/evidence/${e.id}/download`} download>{e.name}</a>
+          ) : (
+            <span className="dim" title={e.storage === "missing" ? "artifact missing from the store" : "attached before SEC-102 — no artifact was stored"}>
+              {e.name} ⚠
+            </span>
+          )}
+        </span>
       ))}
+      {ev.data?.missing ? (
+        <span className="faint" title="evidence rows whose artifact is not in the store">
+          {ev.data.missing} without artifact
+        </span>
+      ) : null}
     </div>
   );
 }

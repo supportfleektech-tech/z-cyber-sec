@@ -843,17 +843,18 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 277 → **280 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 280 → **282 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
 an edited bundle is refused by the recorded hash, unknown provenance is reported and
-gated, and the inventory lists bundles), ruff clean.
+gated, and the inventory lists bundles) and 280 → 282 (2 new: control evidence
+round-trips and verifies, and the seeded evidence points at a real file), ruff clean.
 
-**Current totals:** **280 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **282 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(293.51 kB / 81.86 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-101 series was reproduced first (as a failing check or a live request) and
+(293.95 kB / 81.99 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-102 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1352,3 +1353,33 @@ when it did list something.
 `sha256`, `matches_recorded` and `verifies` from the SEC-100 check) and any stray
 `.db` files. Live: `total: 1` with the bundle, `matches_recorded: true`,
 `verifies: true`.
+
+### SEC-102 — GRC control evidence was hashed and thrown away (fixed)
+
+Found by checking the sibling of the case-evidence path: case evidence is written to
+the store, verified on download and audited, so what does a *control's* evidence do?
+
+**Was:** `attach_evidence` read the upload, computed its sha256, and stored the row
+with `path = NULL` — the bytes were never written anywhere. A control's "audit
+evidence" was therefore a name, a digest and a timestamp with no artifact behind it,
+and no route existed to download one (so nothing could notice). The demo data made
+the gap explicit: the seeded row claimed `policy-review-2026Q3.md` with the digest
+`"synthetic" * 10`. The module docstring promised "evidence is attached to controls
+with sha256 provenance" while the artifact was discarded. The listing also had no
+notion of a missing artifact, unlike case evidence (`path_exists`).
+
+**Fixed:** uploads are written to the evidence store exactly like case evidence
+(token-prefixed safe name, mode 0600, real path recorded, size in the audit detail);
+`GET /api/grc/evidence/{id}/download` (permission `evidence.download`) refuses a
+missing artifact with `410` and a digest mismatch with `500 integrity_mismatch` after
+auditing `evidence.integrity_failure`, and audits a good download
+`evidence.downloaded` — the same contract case evidence has. The listing reports
+`path_exists`, `storage` (`stored`/`missing`/`not_stored`) and a `missing` count, and
+the seed writes a real review note with its real digest. The GRC SPA links each
+evidence name to its download and marks rows without an artifact.
+
+**Live (after fix):** upload → file on disk with mode 0600, digest matching the
+bytes; listing `stored`, `missing: 0`; download 200 with identical bytes; swapped
+file → `500 integrity_mismatch` + `evidence.integrity_failure` audit; removed file →
+`410 missing` and `missing: 1`; seeded control evidence → `stored`,
+`digest_matches_file True` (was `synthetic…` with no path).

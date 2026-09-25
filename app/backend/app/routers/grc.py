@@ -6,13 +6,17 @@ information; evidence is attached to controls with sha256 provenance.
 from __future__ import annotations
 
 import hashlib
+import secrets
 import sqlite3
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .. import db
 from ..audit import record_audit
+from ..config import settings
 from ..deps import require
 
 router = APIRouter(prefix="/api/grc", tags=["grc"])
@@ -110,12 +114,25 @@ def attach_evidence(cid: int, file: UploadFile,
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(413, {"code": "too_large"})
     sha = hashlib.sha256(content).hexdigest()
+    # SEC-102: the upload was hashed and then thrown away — `path` was stored as
+    # NULL, so a control's "audit evidence" was a name, a digest and a timestamp
+    # with no artifact behind it (and nothing could download one either). Write the
+    # bytes to the evidence store exactly like case evidence does.
+    safe_name = "".join(c for c in (file.filename or "upload") if c.isalnum() or c in ".-_")[:160] or "upload"
+    fname = f"{secrets.token_hex(6)}-{safe_name}"
+    settings.evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.evidence_dir / fname
+    path.write_bytes(content)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
     cur = conn.execute(
         "INSERT INTO audit_evidence (control_id, name, path, sha256, created_at) VALUES (?, ?, ?, ?, ?)",
-        (cid, file.filename or "evidence", None, sha, db.utcnow()))
+        (cid, file.filename or safe_name, str(path), sha, db.utcnow()))
     conn.commit()
     record_audit(conn, _actor(user), "grc.evidence.attached", target_type="control", target_id=str(cid),
-                 detail={"name": file.filename, "sha256": sha})
+                 detail={"name": file.filename, "sha256": sha, "size": len(content)})
     return db.one(conn, "SELECT * FROM audit_evidence WHERE id = ?", (cur.lastrowid,))
 
 
@@ -123,7 +140,43 @@ def attach_evidence(cid: int, file: UploadFile,
 def list_control_evidence(cid: int, conn: sqlite3.Connection = Depends(db.get_conn),
                           user: dict = Depends(require("grc.read"))):
     rows = db.q(conn, "SELECT * FROM audit_evidence WHERE control_id = ? ORDER BY id", (cid,))
-    return {"items": rows, "total": len(rows)}
+    for r in rows:
+        # SEC-102: say whether the artifact is actually in the store. Rows written
+        # before the fix have no path at all; a row whose file was removed is a
+        # compliance gap, not a satisfied control.
+        r["path_exists"] = bool(r["path"]) and Path(r["path"]).exists()
+        r["storage"] = "stored" if r["path_exists"] else ("missing" if r["path"] else "not_stored")
+    missing = sum(1 for r in rows if r["storage"] != "stored")
+    return {"items": rows, "total": len(rows), "missing": missing}
+
+
+@router.get("/evidence/{evidence_id}/download")
+def download_control_evidence(evidence_id: int, conn: sqlite3.Connection = Depends(db.get_conn),
+                              user: dict = Depends(require("evidence.download"))):
+    """Download control evidence, refusing a file that fails its recorded digest.
+
+    Same contract as case evidence (SEC-102): a missing artifact is 410, a mismatch
+    is audited `evidence.integrity_failure` and refused, a good download is audited.
+    """
+    e = db.one(conn, "SELECT * FROM audit_evidence WHERE id = ?", (evidence_id,))
+    if not e:
+        raise HTTPException(404, {"code": "not_found"})
+    if not e["path"]:
+        raise HTTPException(410, {"code": "not_stored",
+                                  "message": "This evidence row has no stored artifact "
+                                             "(attached before SEC-102)."})
+    path = Path(e["path"])
+    if not path.exists():
+        raise HTTPException(410, {"code": "missing", "message": "Evidence file missing from store."})
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != e["sha256"]:
+        record_audit(conn, _actor(user), "evidence.integrity_failure",
+                     target_type="control_evidence", target_id=str(evidence_id),
+                     detail={"expected": e["sha256"], "actual": actual})
+        raise HTTPException(500, {"code": "integrity_mismatch"})
+    record_audit(conn, _actor(user), "evidence.downloaded", target_type="control_evidence",
+                 target_id=str(evidence_id), detail={"name": e["name"], "sha256": e["sha256"]})
+    return FileResponse(path, filename=e["name"], media_type="application/octet-stream")
 
 
 class RiskIn(BaseModel):

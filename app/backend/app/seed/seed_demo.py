@@ -318,9 +318,24 @@ def seed_all(conn) -> dict:
                      "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                      (fw, code, title, cat, owner, status, review, db.utcnow(), db.utcnow()))
     counts["controls"] = len(controls)
+    # SEC-102: this row used to be a phantom — `path` NULL and a placeholder digest
+    # ("synthetic" * 10), so the demo claimed audit evidence for a control with no
+    # artifact behind it. Write a real review note and record its real digest.
     c1 = db.one(conn, "SELECT id FROM controls WHERE code='GV-OC-01'")
+    settings.evidence_dir.mkdir(parents=True, exist_ok=True)
+    review = settings.evidence_dir / "demo-policy-review-2026Q3.md"
+    review.write_text(
+        "# Policy review — 2026 Q3\n\n"
+        "Scope: information-security policy set (GV-OC-01).\n\n"
+        "- Reviewed by: platform\n"
+        "- Outcome: policies current; no material changes required this quarter.\n"
+        "- Next review: 2026 Q4.\n\n"
+        "Synthetic demo artifact (seeded, not a real review).\n"
+    )
+    import hashlib
+    policy_sha = hashlib.sha256(review.read_bytes()).hexdigest()
     conn.execute("INSERT INTO audit_evidence (control_id, name, path, sha256, created_at) VALUES (?, ?, ?, ?, ?)",
-                 (c1["id"], "policy-review-2026Q3.md", None, "synthetic" * 10, db.utcnow()))
+                 (c1["id"], review.name, str(review), policy_sha, db.utcnow()))
 
     risks = [
         ("Laptop lab host overloaded", 3, 4, "mitigating", "platform",

@@ -262,6 +262,18 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Compliance evidence
+
+Control evidence (`POST /api/grc/controls/{id}/evidence`) is stored in the evidence
+store (mode 0600) and its sha256 is recorded in the row and the audit log.
+`GET /api/grc/evidence/{id}/download` (permission `evidence.download`) returns the
+artifact, `410` if it is missing from the store or was attached before SEC-102 (no
+artifact was stored then), and `500 integrity_mismatch` — audited as
+`evidence.integrity_failure` — if the file no longer matches its recorded digest. The
+listing reports `storage` (`stored`/`missing`/`not_stored`) and a `missing` count, so
+a control cannot look evidenced by a phantom. Before SEC-102 the upload was hashed and
+discarded.
+
 ## Backups
 
 `POST /api/admin/backup` writes a `.tar.gz` bundle (snapshot + evidence + manifest of
