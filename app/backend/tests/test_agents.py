@@ -267,3 +267,36 @@ def test_agent_rename_is_real_and_protected(client, seeded):
     assert r.status_code == 409 and r.json()["detail"]["code"] == "rename_not_supported"
     after = {a["id"]: a["name"] for a in client.get("/api/agents").json()["items"]}
     assert after[automation["id"]] == "internal-automation"
+
+
+def test_query_events_tool_works_with_and_without_filters(client, seeded):
+    """SEC-095: the `query_events` tool was broken on both paths — `params` was a
+    tuple, so any filter raised `AttributeError: 'tuple' object has no attribute
+    'append'`, and the unfiltered path raised `TypeError` from `min(50, None)`
+    (which is also what it reported as `returned`). Every agent task and playbook
+    step that queried events failed; the seeded `exfil-response-check` playbook's
+    first step is one, discovered while fixing SEC-094."""
+    from app.services import policy
+
+    # unfiltered
+    out = policy.TOOL_REGISTRY["query_events"]["fn"](seeded, {})
+    assert isinstance(out["events"], list) and out["returned"] == len(out["events"])
+    assert out["limit"] == 50
+
+    # filtered by action (the path that used to raise)
+    out = policy.TOOL_REGISTRY["query_events"]["fn"](seeded, {"action": "ssh_failed_login"})
+    assert out["events"] and all(e["action"] == "ssh_failed_login" for e in out["events"])
+
+    # filtered by host
+    host = out["events"][0]["host"]
+    by_host = policy.TOOL_REGISTRY["query_events"]["fn"](seeded, {"host": host})
+    assert by_host["events"] and all(e["host"] == host for e in by_host["events"])
+
+    # both filters at once
+    both = policy.TOOL_REGISTRY["query_events"]["fn"](
+        seeded, {"action": "ssh_failed_login", "host": host})
+    assert all(e["action"] == "ssh_failed_login" and e["host"] == host for e in both["events"])
+
+    # an aggregate that matches nothing is empty, not an error
+    none = policy.TOOL_REGISTRY["query_events"]["fn"](seeded, {"action": "no_such_action"})
+    assert none["events"] == [] and none["returned"] == 0

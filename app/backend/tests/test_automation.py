@@ -89,3 +89,83 @@ def test_on_alert_trigger_creates_pending_run(client, seeded, conn):
     runs = db.q(conn, "SELECT * FROM playbook_runs WHERE trigger LIKE 'on_alert:%'")
     assert runs, "expected a pending playbook run from on_alert:high"
     assert all(run["status"] == "pending" for run in runs)
+
+
+def test_playbook_approval_is_visible_decidable_and_executes(client, seeded):
+    """SEC-094: the approval gate for playbooks was broken end to end.
+
+    `run_playbook` wrote `approvals.task_id = 0` even though the schema documents
+    the column as "agent_tasks(id) for agent approvals, or a playbook_runs(id) for
+    automation"; the queue used an INNER JOIN on agent_tasks, so the approval never
+    appeared; and deciding it by id dereferenced the missing task and returned an
+    opaque 500 after the status change had already been committed — leaving the run
+    `pending`, the approval undecidable, and nothing executed or audited.
+    """
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    pb = next(p for p in client.get("/api/automation").json()["items"]
+              if p["name"] == "exfil-response-check")
+
+    r = client.post(f"/api/automation/{pb['id']}/run", json={})
+    assert r.status_code == 200 and r.json()["status"] == "awaiting_approval"
+    run_id = r.json()["run_id"]
+
+    # 1. the approval is in the queue (it used to be invisible)
+    queue = client.get("/api/agents/approvals", params={"status": "pending"}).json()["items"]
+    ap = next(a for a in queue if a["task_id"] == run_id)
+    assert ap["kind"] == "playbook" and ap["playbook_name"] == "exfil-response-check"
+    assert ap["run_status"] == "pending"
+    assert ap["task_id"] != 0        # the run id, as the schema documents
+
+    # 2. approving executes the plan and completes the run
+    cases_before = client.get("/api/cases").json()["total"]
+    r = client.post(f"/api/agents/approvals/{ap['id']}/decide",
+                    json={"decision": "approve", "comment": "reviewed the plan"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["executed"] is True and body["run_status"] == "completed"
+    run = next(x for x in client.get("/api/automation/runs").json()["items"] if x["id"] == run_id)
+    assert run["status"] == "completed" and run["result"]["results"]
+    assert client.get("/api/cases").json()["total"] == cases_before + 1
+
+    # 3. it is no longer pending, and a second decision is refused
+    assert not [a for a in client.get("/api/agents/approvals", params={"status": "pending"}).json()["items"]
+                if a["id"] == ap["id"]]
+    r = client.post(f"/api/agents/approvals/{ap['id']}/decide", json={"decision": "approve"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "already_decided"
+
+    # 4. the audit trail records what happened
+    actions = [r["action"] for r in dbmod.q(seeded, "SELECT action FROM audit_events "
+                                                    "ORDER BY seq DESC LIMIT 8")]
+    assert "playbook.completed" in actions
+    detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events "
+                                         "WHERE action = 'playbook.completed' ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert detail["executed"] is True and detail["approved_by"] == "admin"
+    assert detail["run_id"] == run_id
+
+
+def test_playbook_approval_rejection_fails_the_run(client, seeded):
+    """The reject half of the same gate (SEC-094): the run must end as failed with
+    the reason, and the consequential step must not run."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    pb = next(p for p in client.get("/api/automation").json()["items"]
+              if p["name"] == "exfil-response-check")
+    run_id = client.post(f"/api/automation/{pb['id']}/run", json={}).json()["run_id"]
+    ap = next(a for a in client.get("/api/agents/approvals", params={"status": "pending"}).json()["items"]
+              if a["task_id"] == run_id)
+
+    cases_before = client.get("/api/cases").json()["total"]
+    r = client.post(f"/api/agents/approvals/{ap['id']}/decide",
+                    json={"decision": "reject", "comment": "not enough evidence"})
+    assert r.status_code == 200 and r.json()["run_status"] == "failed"
+    run = next(x for x in client.get("/api/automation/runs").json()["items"] if x["id"] == run_id)
+    assert run["status"] == "failed" and run["result"]["error"] == "approval_rejected"
+    assert "not enough evidence" in run["result"]["reason"] or "rejected by" in run["result"]["reason"]
+    assert client.get("/api/cases").json()["total"] == cases_before
+
+    detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events "
+                                         "WHERE action = 'playbook.rejected' ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert detail["run_id"] == run_id and detail["applied"] is True

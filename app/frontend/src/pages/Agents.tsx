@@ -30,6 +30,11 @@ interface Approval {
   created_at: string;
   task_title?: string;
   agent_name?: string;
+  // SEC-094: approvals raised by a playbook run are labelled so an approver can
+  // tell them apart from agent-task approvals (they used to be missing entirely).
+  kind?: string;
+  playbook_name?: string | null;
+  run_status?: string | null;
 }
 interface Paged<T> {
   items: T[];
@@ -66,8 +71,15 @@ export default function Agents() {
             <tbody>
               {approvals.data.items.map((a) => (
                 <tr key={a.id}>
-                  <td>{a.agent_name || `#${a.task_id}`}</td>
-                  <td>{a.task_title || `task ${a.task_id}`}</td>
+                  <td>
+                    {a.kind === "playbook"
+                      ? <span className="st new">playbook</span>
+                      : a.agent_name || `#${a.task_id}`}
+                  </td>
+                  <td>
+                    {a.task_title || `task ${a.task_id}`}
+                    {a.kind === "playbook" && a.run_status ? <span className="faint"> · run {a.run_status}</span> : null}
+                  </td>
                   <td className="mono">{a.action}</td>
                   <td className="dim">{a.requested_by}</td>
                   <td className="dim">{fmtTs(a.created_at)}</td>

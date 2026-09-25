@@ -237,6 +237,22 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## Approvals
+
+`GET /api/agents/approvals?status=pending` returns every pending approval with
+`kind` (`agent_task` | `playbook`), `task_title`, `agent_name` and — for playbook
+approvals — `playbook_name` and `run_status`. `POST /{id}/decide`
+(`{decision: approve|reject, comment?}`) is a compare-and-set: the second decision
+gets `409 already_decided`.
+
+- **Agent-task approval**: approving executes the tool through the policy engine
+  once all approvals for the task are decided (SEC-078).
+- **Playbook approval**: `task_id` is the `playbook_runs` row (SEC-094).
+  Approving the last pending approval for a run claims it (`pending → running`) and
+  executes the run's validated plan with the automation agent; rejecting fails the
+  run with the reason. `409 missing_run` / `409 missing_task` if the owning row is
+  gone (previously a 500 that left the run struck).
+
 ## Alert aggregation
 
 `POST /api/soc/events` is idempotent per `idempotency_key` and returns

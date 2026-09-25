@@ -255,13 +255,102 @@ class ApprovalDecision(BaseModel):
     comment: str | None = Field(default=None, max_length=1000)
 
 
+def _decide_playbook_approval(conn, ap: dict, body, user: dict, status: str, now: str):
+    """Decide an approval raised by a playbook run (SEC-094).
+
+    Approving the last pending approval for the run executes its validated plan
+    exactly like a run that needed no approval; rejecting it fails the run with
+    the reason. The run transition is a compare-and-set, so two approvers
+    deciding concurrently can only execute the plan once.
+    """
+    from .automation import _automation_agent
+
+    run = db.one(conn, "SELECT * FROM playbook_runs WHERE id = ?", (ap["task_id"],))
+    if run is None:
+        raise HTTPException(409, {"code": "missing_run",
+                                  "message": f"approval {ap['id']} refers to playbook run "
+                                             f"{ap['task_id']}, which no longer exists"})
+    if body.decision == "reject":
+        cur = conn.execute(
+            "UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (now, db.jdump({"error": "approval_rejected", "approval_id": ap["id"],
+                            "reason": f"approval rejected by {user['username']}"}), run["id"]))
+        conn.commit()
+        record_audit(conn, _actor(user), "playbook.rejected", target_type="playbook",
+                     target_id=str(run["playbook_id"]),
+                     detail={"run_id": run["id"], "approval_id": ap["id"],
+                             "action": ap["action"], "comment": body.comment,
+                             "applied": bool(cur.rowcount)})
+        return {"approval_id": ap["id"], "status": status, "decision": "reject",
+                "run_id": run["id"], "run_status": "failed"}
+
+    others = db.one(conn, "SELECT COUNT(*) c FROM approvals "
+                          "WHERE task_id = ? AND action LIKE 'playbook:%' AND status = 'pending' "
+                          "AND id <> ?", (run["id"], ap["id"]))
+    if int(others["c"]) > 0:
+        conn.commit()
+        record_audit(conn, _actor(user), "approval.approved", target_type="approval",
+                     target_id=str(ap["id"]),
+                     detail={"run_id": run["id"], "comment": body.comment,
+                             "waiting_on": int(others["c"])})
+        return {"approval_id": ap["id"], "status": status, "decision": "approve",
+                "run_id": run["id"], "run_status": run["status"],
+                "awaiting_more_approvals": int(others["c"])}
+
+    plan = (db.jload(run.get("result"), {}) or {}).get("plan") or {}
+    steps = plan.get("steps") or []
+    agent = _automation_agent(conn)
+    if not agent:
+        conn.rollback()
+        raise HTTPException(503, {"code": "automation_agent_missing",
+                                  "message": "the automation agent is not registered"})
+    claim = conn.execute("UPDATE playbook_runs SET status = 'running' "
+                         "WHERE id = ? AND status = 'pending'", (run["id"],))
+    if claim.rowcount != 1:
+        conn.rollback()
+        record_audit(conn, _actor(user), "approval.approved", target_type="approval",
+                     target_id=str(ap["id"]),
+                     detail={"run_id": run["id"], "comment": body.comment, "executed": False})
+        return {"approval_id": ap["id"], "status": status, "decision": "approve",
+                "run_id": run["id"], "run_status": run["status"], "executed": False}
+
+    conn.commit()
+    from ..services import policy as _policy
+    result = _policy.execute_task(conn, {"id": run["id"], "request": db.jdump({"steps": steps})}, agent)
+    run_status = "completed" if not result.get("errors") else "failed"
+    conn.execute("UPDATE playbook_runs SET status = ?, finished_at = ?, result = ? WHERE id = ?",
+                 (run_status, db.utcnow(), db.jdump(result), run["id"]))
+    conn.commit()
+    record_audit(conn, _actor(user), f"playbook.{run_status}", target_type="playbook",
+                 target_id=str(run["playbook_id"]),
+                 detail={"run_id": run["id"], "approved_by": user["username"],
+                         "approval_id": ap["id"], "errors": result.get("errors", [])[:5],
+                         "executed": True})
+    return {"approval_id": ap["id"], "status": status, "decision": "approve",
+            "run_id": run["id"], "run_status": run_status, "executed": True,
+            "result": result}
+
+
 @router.get("/approvals")
 def list_approvals(conn: sqlite3.Connection = Depends(db.get_conn),
                    user: dict = Depends(require("agents.approve")),
                    status: str = Query(default="pending")):
-    rows = db.q(conn, "SELECT ap.*, t.title AS task_title, a.name AS agent_name "
-                      "FROM approvals ap JOIN agent_tasks t ON t.id = ap.task_id "
-                      "JOIN agents a ON a.id = t.agent_id WHERE ap.status = ? ORDER BY ap.id DESC",
+    # SEC-094: this was an INNER JOIN on agent_tasks, so an approval whose
+    # `task_id` referred to a playbook run disappeared from the queue entirely —
+    # the run sat `pending` and the operator had no way to see or decide it.
+    rows = db.q(conn,
+                "SELECT ap.*, "
+                "       COALESCE(t.title, pb.name || ' run #' || pr.id) AS task_title, "
+                "       COALESCE(a.name, 'automation') AS agent_name, "
+                "       CASE WHEN ap.action LIKE 'playbook:%' THEN 'playbook' ELSE 'agent_task' END AS kind, "
+                "       pb.name AS playbook_name, pr.status AS run_status "
+                "FROM approvals ap "
+                "LEFT JOIN agent_tasks t ON t.id = ap.task_id AND ap.action NOT LIKE 'playbook:%' "
+                "LEFT JOIN agents a ON a.id = t.agent_id "
+                "LEFT JOIN playbook_runs pr ON pr.id = ap.task_id AND ap.action LIKE 'playbook:%' "
+                "LEFT JOIN playbooks pb ON pb.id = pr.playbook_id "
+                "WHERE ap.status = ? ORDER BY ap.id DESC",
                 (status,))
     return {"items": rows, "total": len(rows)}
 
@@ -293,7 +382,20 @@ def decide_approval(approval_id: int, body: ApprovalDecision,
         conn.rollback()
         raise HTTPException(409, {"code": "already_decided",
                                   "message": "Another decision for this approval was committed first."})
+    # SEC-094: a playbook approval's `task_id` is a playbook_runs row, not an
+    # agent task. Falling through to the agent-task path dereferenced a missing
+    # task (`task["agent_id"]` on None) and returned an opaque 500 *after* the
+    # status change above had already been committed — so the run stayed
+    # `pending`, the approval could never be decided again, and nothing was
+    # executed or audited.
+    if ap["action"].startswith("playbook:"):
+        return _decide_playbook_approval(conn, ap, body, user, status, now)
+
     task = db.one(conn, "SELECT * FROM agent_tasks WHERE id = ?", (ap["task_id"],))
+    if task is None:
+        raise HTTPException(409, {"code": "missing_task",
+                                  "message": f"approval {approval_id} refers to agent task "
+                                             f"{ap['task_id']}, which no longer exists"})
     agent = db.one(conn, "SELECT * FROM agents WHERE id = ?", (task["agent_id"],))
     if body.decision == "reject":
         conn.execute("UPDATE agent_tasks SET status = 'denied', result = ?, finished_at = ? WHERE id = ?",

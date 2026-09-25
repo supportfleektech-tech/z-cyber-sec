@@ -114,9 +114,13 @@ def run_playbook(pb_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.
     if plan["status"] == "awaiting_approval":
         for step in plan["steps"]:
             if not policy.TOOL_REGISTRY[step["tool"]]["read_only"]:
+                # SEC-094: the schema documents this column as the owning row
+                # (agent_tasks.id for agent approvals, playbook_runs.id for
+                # automation) but the code wrote 0 — so the approval could not be
+                # linked back to its run by the queue or the decision handler.
                 conn.execute("INSERT INTO approvals (task_id, action, status, requested_by, created_at) "
                              "VALUES (?, ?, 'pending', ?, ?)",
-                             (0, f"playbook:{pb['name']}:{step['tool']}", user["username"], now))
+                             (run_id, f"playbook:{pb['name']}:{step['tool']}", user["username"], now))
         conn.execute("UPDATE playbook_runs SET status = 'pending', result = ? WHERE id = ?",
                      (db.jdump({"awaiting_approval": True, "plan": plan, "note": body.note}), run_id))
         conn.commit()

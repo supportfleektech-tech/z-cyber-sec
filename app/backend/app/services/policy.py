@@ -88,9 +88,17 @@ def validate_args(args: dict, tool: str | None = None) -> str | None:
 # consequential tools: always require a pending human approval.
 
 def _query_events(conn, args):
+    """Recent events, optionally filtered by action/host (max 50).
+
+    SEC-095: this tool was broken on both paths — `params` was a *tuple*, so any
+    filter raised `AttributeError: 'tuple' object has no attribute 'append'`, and
+    the unfiltered path raised `TypeError` from `min(50, None)` while reporting
+    `returned` as that expression. Every agent task and playbook step that queried
+    events failed; the seeded `exfil-response-check` playbook's first step was one.
+    """
     action = args.get("action")
     host = args.get("host")
-    sql, params = "SELECT id, ts, host, user, action, outcome, severity, msg FROM events", ()
+    sql, params = "SELECT id, ts, host, user, action, outcome, severity, msg FROM events", []
     where = []
     if action:
         where.append("action = ?")
@@ -101,7 +109,8 @@ def _query_events(conn, args):
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY ts DESC LIMIT 50"
-    return {"events": db.q(conn, sql, tuple(params)), "returned": min(50, None)}
+    rows = db.q(conn, sql, tuple(params))
+    return {"events": rows, "returned": len(rows), "limit": 50}
 
 
 def _get_alerts(conn, args):

@@ -840,10 +840,13 @@ clears `fixed_at`), ruff clean.
 
 Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 
-**Current totals:** **268 tests pass** (`pytest -q`, ~4 min), ruff clean,
+Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
+fails the run, `query_events` filtered/unfiltered), ruff clean.
+
+**Current totals:** **271 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(292.27 kB / 81.50 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-093 series was reproduced first (as a failing check or a live request) and
+(292.45 kB / 81.56 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-095 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1108,3 +1111,57 @@ same number.
 4 more → `count: 10` with 10 ids (the old code would have said 4), the
 `/api/soc/alerts` column shows 10, and re-sending an idempotent batch inserts
 nothing and leaves the count unchanged.
+
+### SEC-094 — the playbook approval gate was a dead end (fixed)
+
+Found while probing the automation workflow: run a playbook whose plan needs
+approval and try to approve it.
+
+**Was:** `run_playbook` inserted `approvals.task_id = 0` even though the schema
+documents the column as "agent_tasks(id) for agent approvals, or a
+playbook_runs(id) for automation". Two consequences, both live-verified:
+
+1. **Invisible** — `GET /api/agents/approvals` (the queue the SPA renders) used an
+   `INNER JOIN agent_tasks ON t.id = ap.task_id`, so an approval with `task_id = 0`
+   was dropped. A run reached `awaiting_approval` and the queue showed *nothing*;
+   there was no path in the product to approve it.
+2. **Undecidable** — deciding it by id fell through to the agent-task path, where
+   `task = None` and `task["agent_id"]` raised `TypeError` → an opaque **500**,
+   *after* the compare-and-set status change had already been committed. The
+   approval was consumed, the run stayed `pending` forever, and nothing was
+   executed or audited.
+
+**Fixed:** the approval stores the run id; the queue LEFT JOINs both owners and
+labels `kind: playbook` with the playbook name and run status; the decision path
+branches on the `playbook:` action prefix — approving the last pending approval
+for a run compare-and-set-claims it (`pending → running`) and executes its
+validated plan with the automation agent, rejecting fails the run with the reason,
+and a missing owner row is a `409 missing_run`/`missing_task` instead of a 500.
+The SPA labels playbook approvals.
+
+**Live (after fix):** run → `awaiting_approval`, queue shows
+`{task_id: 7, kind: playbook, playbook_name: exfil-response-check, run_status: pending}`;
+approve → `{executed: true, run_status: completed}`, all three steps ran and the
+`create_case` step created the case; a second decision → `409 already_decided`;
+reject → run `failed` with `{error: approval_rejected, reason: ...}`, the case
+count unchanged, audited as `playbook.rejected {applied: true}`.
+
+### SEC-095 — the `query_events` tool was broken on both paths (fixed)
+
+Found while verifying SEC-094: the approved playbook run reported
+`query_events failed: 'tuple' object has no attribute 'append'`.
+
+**Was:** `_query_events` initialised `sql, params = "...", ()` and then called
+`params.append(...)` for an `action`/`host` filter (AttributeError), and its
+unfiltered path evaluated `min(50, None)` (TypeError) — which it also reported as
+`returned`. So the tool never worked: any agent task or playbook step that queried
+events failed, including the seeded `exfil-response-check` playbook's first step.
+
+**Fixed:** `params` is a list, and `returned` is the actual row count with the
+`limit` reported separately.
+
+**Verified:** a sweep that invokes every read-only tool in the registry with and
+without arguments now passes for all of them (the consequential tools are
+skipped), and live an agent task using `query_events` with a filter completes and
+returns 8 events; the playbook run above executed all three steps with
+`errors: []`.
