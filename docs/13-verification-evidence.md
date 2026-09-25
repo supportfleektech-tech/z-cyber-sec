@@ -843,13 +843,13 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → **272 passed** (1 new: alert trigger runs auto playbooks and suggests
-the rest), ruff clean.
+Suite 271 → 272 → **274 passed** (1 new: alert trigger runs auto playbooks and suggests
+the rest) and 272 → 274 (2 new: partial plans are refused as a whole), ruff clean.
 
-**Current totals:** **272 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **274 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (292.74 kB / 81.61 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-096 series was reproduced first (as a failing check or a live request) and
+SEC-097 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1198,3 +1198,31 @@ both read-only tools executed; a critical alert → run 9 auto-triggered
 (`{auto_run: true, outcome: awaiting_approval}`), an approval raised with
 `kind: playbook`, force-execute refused `409 awaiting_approval`, and approving it
 completed the run.
+
+### SEC-097 — a plan that lost a step ran partially and reported success (fixed)
+
+Found while probing the trigger path from SEC-096: what happens when only *part* of
+a requested plan is refused?
+
+**Was:** `plan_task` dropped refused steps, kept the survivors, and returned
+`pending`, so callers executed a **different plan than the one requested**:
+`[query_events (allowed), contain_asset (not in the automation agent's allowlist)]`
+came back `completed` with `errors: []`, ran only `query_events`, and the playbook's
+detail said "plan: ok". The refused step was recorded nowhere the operator could
+see: `tool_calls` rows were written with `task_id = None` (0) for both agent tasks
+and playbooks — ten such rows in the seeded DB — and the agent-task path never
+audited a partial refusal at all (only a fully-denied plan was).
+
+**Fixed:** `plan_task` now returns the refused steps (`denied_calls`) and callers
+attach them to the row that owns them via `policy.record_denials(conn, id, plan)` —
+so a partial refusal is visible on the run/task it belongs to, not orphaned.
+Non-empty `reasons` now fail the unit closed: the playbook run is created `failed`
+with `{error: "denied", reasons: [...]}` and audited `playbook.failed` with the
+reasons, and an agent task is `denied` and audited `agent.task.denied` with
+`{reasons, partial: true}`. Nothing runs unless the whole plan is admissible.
+
+**Live (after fix):** the same probe → run `denied`, `reasons: ["tool not in agent
+allowlist: contain_asset"]`, read back as `failed {error: denied, reasons: [...]}`,
+no `results` at all; the identical agent-task request → task `denied` with
+`tool_calls: [("contain_asset", 0)]` on that task; `tool_calls` rows with `task_id 0`
+= 0; and a fully-valid playbook still runs → `completed` with both tools.

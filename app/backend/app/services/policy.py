@@ -356,28 +356,43 @@ def plan_task(conn, agent: dict, request: dict, requester: dict) -> dict:
     reasons = []
     needs_approval = False
     valid_steps = []
+    denied_calls: list[dict] = []
     for step in steps:
         tool, args = step.get("tool"), step.get("args") or {}
         if tool not in TOOL_REGISTRY:
             reasons.append(f"unknown tool: {tool}")
-            _record_call(conn, None, tool, args, False, "tool not in registry")
+            denied_calls.append({"tool": tool, "args": args, "reason": "tool not in registry"})
             continue
         if tool not in allowed_tools:
             reasons.append(f"tool not in agent allowlist: {tool}")
-            _record_call(conn, None, tool, args, False, "not in agent allowlist")
+            denied_calls.append({"tool": tool, "args": args, "reason": "not in agent allowlist"})
             continue
         inj = validate_args(args, tool)
         if inj:
             reasons.append(inj)
-            _record_call(conn, None, tool, args, False, inj)
+            denied_calls.append({"tool": tool, "args": args, "reason": inj})
             continue
         if not TOOL_REGISTRY[tool]["read_only"]:
             needs_approval = True
         valid_steps.append(step)
+    # SEC-097: refused steps used to be written straight to `tool_calls` with
+    # `task_id = None`, i.e. against a non-existent task — the denial was recorded
+    # but never visible on the task or run it belonged to. The caller owns the id,
+    # so it records them with `record_denials()` once the row exists.
     if not valid_steps:
-        return {"status": "denied", "reasons": reasons, "steps": []}
+        return {"status": "denied", "reasons": reasons, "steps": [], "denied_calls": denied_calls}
+    # A plan that lost steps is not a plan that can run: `reasons` non-empty means
+    # part of what was asked for was refused, so callers must fail the whole unit
+    # rather than execute the surviving steps and report success (SEC-097).
     status = "awaiting_approval" if needs_approval else "pending"
-    return {"status": status, "reasons": reasons, "steps": valid_steps}
+    return {"status": status, "reasons": reasons, "steps": valid_steps,
+            "denied_calls": denied_calls}
+
+
+def record_denials(conn, task_id: int, plan: dict) -> None:
+    """Attach a plan's refused steps to the row that requested them (SEC-097)."""
+    for d in plan.get("denied_calls") or []:
+        _record_call(conn, task_id, d["tool"], d["args"], False, d["reason"])
 
 
 def _record_call(conn, task_id, tool, args, allowed, reason, result=None):

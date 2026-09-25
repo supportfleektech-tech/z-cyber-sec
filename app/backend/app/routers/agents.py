@@ -176,9 +176,15 @@ def create_task(body: TaskIn, conn: sqlite3.Connection = Depends(db.get_conn),
         (agent["id"], body.title, plan["status"],
          db.jdump({"steps": plan["steps"], "original": body.request}), now))
     task_id = int(cur.lastrowid)
-    if plan["status"] == "denied":
+    # SEC-097: refused steps are recorded against this task (they used to land on
+    # task_id 0, invisible in the task's audited tool-call list), and a plan that
+    # lost steps is refused as a whole — the task must not run a subset of what
+    # was asked for and report success.
+    policy.record_denials(conn, task_id, plan)
+    if plan["status"] == "denied" or plan["reasons"]:
         record_audit(conn, _actor(user), "agent.task.denied", target_type="agent_task",
-                     target_id=str(task_id), detail={"reasons": plan["reasons"][:5]})
+                     target_id=str(task_id),
+                     detail={"reasons": plan["reasons"][:5], "partial": plan["status"] != "denied"})
         conn.execute("UPDATE agent_tasks SET status = 'denied', result = ?, finished_at = ? WHERE id = ?",
                      (db.jdump({"denied": True, "reasons": plan["reasons"]}), now, task_id))
         conn.commit()

@@ -237,6 +237,17 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## Plan admissibility
+
+A request (agent task or playbook run) is planned against the agent allowlist,
+the tool registry and the arg validators. If **any** step is refused — unknown
+tool, not in the allowlist, failing arg validation — the whole unit fails closed:
+the run/task is `failed`/`denied` with `reasons`, audited (`playbook.failed` /
+`agent.task.denied` with `partial: true`), and **no** step executes. The refused
+steps are recorded against the row that asked for them, so the task's or run's
+audited call list shows exactly what was blocked. Before SEC-097 refused steps were
+dropped silently, the surviving steps ran, and the unit reported success.
+
 ## Playbook runs
 
 Alerts with severity `>=` a playbook's `on_alert:<severity>` threshold create a

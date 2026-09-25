@@ -84,8 +84,13 @@ def _plan_and_execute(conn, pb: dict, run_id: int, actor: dict, note: str | None
         raise RuntimeError(f"agent '{AUTOMATION_AGENT_NAME}' not registered")
     plan = policy.plan_task(conn, agent, {"steps": steps}, actor)
     now = db.utcnow()
+    # SEC-097: refused steps belong to this run (they used to be orphaned on
+    # task_id 0), and a plan that lost steps must not be reported as a success —
+    # previously the surviving steps ran, the run said `completed` with no errors,
+    # and the skipped step appeared nowhere.
+    policy.record_denials(conn, run_id, plan)
 
-    if plan["status"] == "denied":
+    if plan["status"] == "denied" or plan["reasons"]:
         conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? WHERE id = ?",
                      (now, db.jdump({"error": "denied", "reasons": plan["reasons"], "note": note}), run_id))
         conn.commit()

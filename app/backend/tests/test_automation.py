@@ -236,3 +236,66 @@ def test_alert_trigger_runs_auto_playbooks_and_suggests_the_rest(client, seeded)
     # a run waiting on approvals cannot be force-executed through the endpoint
     r = client.post(f"/api/automation/runs/{auto[0]['id']}/execute", json={})
     assert r.status_code == 409 and r.json()["detail"]["code"] == "awaiting_approval"
+
+
+def test_partial_plan_is_refused_not_silently_truncated(client, seeded):
+    """SEC-097: a plan that loses steps used to be executed *partially* and
+    reported as success. Live-verified before the fix: a playbook whose steps were
+    [query_events (allowed), contain_asset (not in the automation agent's
+    allowlist)] ran to `completed` with `errors: []`, executed only the first
+    step, and mentioned the skipped one nowhere — while the audit trail said
+    `playbook.completed`. The refused step was also written to `tool_calls` with
+    task_id 0, so it never appeared on the run it belonged to."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    pb = client.post("/api/automation", json={
+        "name": "partial-plan-probe", "trigger": "manual",
+        "steps": [{"tool": "query_events", "args": {}},
+                  {"tool": "contain_asset", "args": {"asset_id": 1}}]}).json()
+
+    r = client.post(f"/api/automation/{pb['id']}/run", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # the whole run fails, naming the refused step
+    assert body["status"] == "denied"
+    assert any("contain_asset" in reason for reason in body["reasons"])
+    run = next(x for x in client.get("/api/automation/runs").json()["items"] if x["id"] == body["run_id"])
+    assert run["status"] == "failed" and run["result"]["error"] == "denied"
+    assert any("contain_asset" in reason for reason in run["result"]["reasons"])
+    # nothing ran: the allowed step was not executed either
+    assert "results" not in run["result"]
+
+    # the refused step is attached to the run, so the audit shows what was blocked
+    denied = dbmod.q(seeded, "SELECT task_id, tool, allowed, reason FROM tool_calls "
+                             "WHERE tool = 'contain_asset' ORDER BY id DESC LIMIT 1")[0]
+    assert denied["task_id"] == body["run_id"] and denied["allowed"] == 0
+    assert "allowlist" in denied["reason"]
+    assert not dbmod.q(seeded, "SELECT id FROM tool_calls WHERE task_id = 0")
+
+    # audit says failed, with the reasons
+    detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'playbook.failed' "
+                                         "ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert detail["run_id"] == body["run_id"] and any("contain_asset" in r for r in detail["reasons"])
+
+
+def test_partial_agent_task_request_is_refused(client, seeded):
+    """The same rule for agent tasks (SEC-097): a multi-step request that loses a
+    step is denied as a whole, and the refusal is visible on the task."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+    agent = next(a for a in client.get("/api/agents").json()["items"] if a["name"] == "opencode-repo")
+
+    r = client.post("/api/agents/tasks", json={
+        "agent_id": agent["id"], "title": "Partial request",
+        "request": {"steps": [{"tool": "query_events", "args": {}},
+                              {"tool": "contain_asset", "args": {"asset_id": 1}}]}})
+    assert r.status_code == 201, r.text
+    task = r.json()
+    assert task["status"] == "denied"
+    assert any("contain_asset" in reason for reason in task["result"]["reasons"])
+
+    calls = dbmod.q(seeded, "SELECT tool, allowed, reason FROM tool_calls WHERE task_id = ?", (task["id"],))
+    assert any(c["tool"] == "contain_asset" and c["allowed"] == 0 for c in calls)
+    assert not dbmod.q(seeded, "SELECT id FROM tool_calls WHERE task_id = 0")
