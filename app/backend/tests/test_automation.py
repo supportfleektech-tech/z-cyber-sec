@@ -169,3 +169,70 @@ def test_playbook_approval_rejection_fails_the_run(client, seeded):
     detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events "
                                          "WHERE action = 'playbook.rejected' ORDER BY seq DESC LIMIT 1")[0]["detail"])
     assert detail["run_id"] == run_id and detail["applied"] is True
+
+
+def _ingest(client, action, host, n, extra=None):
+    from datetime import UTC, datetime
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events = []
+    for i in range(n):
+        e = {"ts": now, "source_type": "log", "source_name": "sshd" if action == "ssh_failed_login" else "edr",
+             "host": host, "user": "root", "action": action, "outcome": "failure",
+             "severity": "low", "msg": f"{action} {host} {i}"}
+        e.update(extra or {})
+        events.append(e)
+    return client.post("/api/soc/events", json={"events": events}).json()
+
+
+def test_alert_trigger_runs_auto_playbooks_and_suggests_the_rest(client, seeded):
+    """SEC-096: the alert trigger inserted a `pending` run and nothing else — no
+    plan, no approvals, no execution, and no endpoint to progress it — so every
+    triggered run was inert forever, including `auto_run = 1` playbooks. Live
+    evidence before the fix: three rows sitting at `pending` with
+    `trigger: on_alert:N`."""
+    from app import db as dbmod
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+
+    # high-severity alert -> playbook 1 (on_alert:high, auto_run = 0) is suggested
+    raised = _ingest(client, "ssh_failed_login", "suggest-02", 6)
+    assert [a for a in raised["alerts"] if a["status"] == "created"]
+    runs = client.get("/api/automation/runs").json()["items"]
+    suggested = [r for r in runs if r["trigger"].startswith("on_alert:") and r["playbook_id"] == 1]
+    assert suggested and all(r["status"] == "pending" and r["result"] is None for r in suggested)
+    run = suggested[0]
+    # audited as a suggestion, with the alert that caused it
+    ev = dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'playbook.triggered' "
+                         "ORDER BY seq DESC LIMIT 1")[0]
+    detail = dbmod.jload(ev["detail"])
+    assert detail["run_id"] == run["id"] and detail["auto_run"] is False and detail["suggested"] is True
+
+    # ... and the suggestion is now actionable
+    r = client.post(f"/api/automation/runs/{run['id']}/execute", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "completed"
+    after = next(x for x in client.get("/api/automation/runs").json()["items"] if x["id"] == run["id"])
+    assert after["status"] == "completed" and after["result"]["results"]
+
+    # a second execution of the same run is refused (CAS)
+    r = client.post(f"/api/automation/runs/{run['id']}/execute", json={})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "not_pending"
+
+    # critical alert -> playbook 2 (on_alert:critical, auto_run = 1) runs itself;
+    # its plan contains a consequential step, so it waits on an approval (SEC-094)
+    _ingest(client, "network_out", "exfil-01", 1,
+            extra={"data": {"bytes_out": 200000000, "dst_ip": "203.0.113.66"}})
+    runs = client.get("/api/automation/runs").json()["items"]
+    auto = [r for r in runs if r["playbook_id"] == 2 and r["trigger"].startswith("on_alert:")]
+    assert auto, "the auto_run playbook should have been triggered"
+    assert auto[0]["status"] == "pending"
+    assert auto[0]["result"] and auto[0]["result"]["awaiting_approval"] is True
+    ap = [a for a in client.get("/api/agents/approvals").json()["items"] if a["task_id"] == auto[0]["id"]]
+    assert ap and ap[0]["kind"] == "playbook"
+    detail = dbmod.jload(dbmod.q(seeded, "SELECT detail FROM audit_events WHERE action = 'playbook.triggered' "
+                                         "ORDER BY seq DESC LIMIT 1")[0]["detail"])
+    assert detail["auto_run"] is True and detail["outcome"] == "awaiting_approval"
+
+    # a run waiting on approvals cannot be force-executed through the endpoint
+    r = client.post(f"/api/automation/runs/{auto[0]['id']}/execute", json={})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "awaiting_approval"

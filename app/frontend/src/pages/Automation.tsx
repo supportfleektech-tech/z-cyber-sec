@@ -101,7 +101,7 @@ export default function Automation() {
         <LoadBlock loading={runs.loading} error={runs.error} empty={!runs.data?.items?.length}>
           <table className="tbl">
             <thead>
-              <tr><th>ID</th><th>Playbook</th><th>Trigger</th><th>Status</th><th>Started</th><th>Result</th></tr>
+              <tr><th>ID</th><th>Playbook</th><th>Trigger</th><th>Status</th><th>Started</th><th>Result</th><th></th></tr>
             </thead>
             <tbody>
               {runs.data!.items.map((r) => (
@@ -121,6 +121,27 @@ export default function Automation() {
                             ? "awaiting human approval"
                             : `plan: ${r.result.plan?.status || "ok"}`
                       : "—"}
+                  </td>
+                  <td>
+                    {/* SEC-096: alert-triggered runs used to sit `pending` forever
+                        with no way to act on them. auto_run playbooks run
+                        themselves; the rest are suggestions an operator starts. */}
+                    {r.status === "pending" && r.result == null ? (
+                      <button
+                        className="small"
+                        onClick={async () => {
+                          try {
+                            const out = await api.post<{ status: string }>(`/api/automation/runs/${r.id}/execute`, {});
+                            flashShow(`Run ${r.id} → ${out.status}`);
+                            runs.reload();
+                          } catch (e) {
+                            flashShow((e as Error).message, false);
+                          }
+                        }}
+                      >
+                        Run
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ))}

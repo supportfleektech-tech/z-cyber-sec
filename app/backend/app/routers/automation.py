@@ -70,30 +70,76 @@ class RunIn(BaseModel):
     note: str | None = Field(default=None, max_length=300)
 
 
+def _plan_and_execute(conn, pb: dict, run_id: int, actor: dict, note: str | None = None) -> dict:
+    """Plan a pending run and move it to its next state (SEC-096).
+
+    Shared by the manual run endpoint, the automatic alert trigger and the
+    "execute this suggested run" endpoint, so all three behave identically: a
+    denied plan fails the run with reasons, a plan with consequential steps raises
+    approvals and waits (SEC-094), and a read-only plan executes immediately.
+    """
+    steps = db.jload(pb["steps"], [])
+    agent = _automation_agent(conn)
+    if not agent:
+        raise RuntimeError(f"agent '{AUTOMATION_AGENT_NAME}' not registered")
+    plan = policy.plan_task(conn, agent, {"steps": steps}, actor)
+    now = db.utcnow()
+
+    if plan["status"] == "denied":
+        conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? WHERE id = ?",
+                     (now, db.jdump({"error": "denied", "reasons": plan["reasons"], "note": note}), run_id))
+        conn.commit()
+        record_audit(conn, actor, "playbook.failed", target_type="playbook", target_id=str(pb["id"]),
+                     detail={"run_id": run_id, "reasons": plan["reasons"][:5], "note": note})
+        return {"run_id": run_id, "status": "denied", "reasons": plan["reasons"], "note": note}
+
+    if plan["status"] == "awaiting_approval":
+        for step in plan["steps"]:
+            if not policy.TOOL_REGISTRY[step["tool"]]["read_only"]:
+                # SEC-094: the schema documents this column as the owning row
+                # (agent_tasks.id for agent approvals, playbook_runs.id for
+                # automation) — the run id links the approval back to its run.
+                conn.execute("INSERT INTO approvals (task_id, action, status, requested_by, created_at) "
+                             "VALUES (?, ?, 'pending', ?, ?)",
+                             (run_id, f"playbook:{pb['name']}:{step['tool']}", actor["name"], now))
+        conn.execute("UPDATE playbook_runs SET status = 'pending', result = ? WHERE id = ?",
+                     (db.jdump({"awaiting_approval": True, "plan": plan, "note": note}), run_id))
+        conn.commit()
+        record_audit(conn, actor, "playbook.awaiting_approval", target_type="playbook",
+                     target_id=str(pb["id"]), detail={"run_id": run_id, "note": note})
+        return {"run_id": run_id, "status": "awaiting_approval", "reasons": plan["reasons"], "note": note}
+
+    result = policy.execute_task(conn, {"id": run_id, "request": db.jdump({"steps": plan["steps"]})}, agent)
+    result["note"] = note
+    status = "completed" if not result.get("errors") else "failed"
+    conn.execute("UPDATE playbook_runs SET status = ?, finished_at = ?, result = ? WHERE id = ?",
+                 (status, db.utcnow(), db.jdump(result), run_id))
+    conn.commit()
+    record_audit(conn, actor, f"playbook.{status}", target_type="playbook", target_id=str(pb["id"]),
+                 detail={"run_id": run_id, "errors": result.get("errors", [])[:5], "note": note})
+    return {"run_id": run_id, "status": status, "result": result, "note": note}
+
+
 @router.post("/{pb_id}/run")
 def run_playbook(pb_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.get_conn),
                  user: dict = Depends(require("automation.run"))):
     pb = db.one(conn, "SELECT * FROM playbooks WHERE id = ?", (pb_id,))
     if not pb:
         raise HTTPException(404, {"code": "not_found"})
-    steps = db.jload(pb["steps"], [])
-    agent = _automation_agent(conn)
-    if not agent:
-        raise HTTPException(503, {"code": "automation_agent_missing",
-                                  "message": f"agent '{AUTOMATION_AGENT_NAME}' not registered"})
-
-    plan = policy.plan_task(conn, agent, {"steps": steps}, _actor(user))
     now = db.utcnow()
     cur = conn.execute(
         "INSERT INTO playbook_runs (playbook_id, trigger, status, started_at, result) VALUES (?, ?, ?, ?, ?)",
         (pb_id, "manual", "pending", now, None))
     run_id = int(cur.lastrowid)
 
-    # SEC-090: `note` was accepted and thrown away. It is the operator's "why"
-    # for this run — the same reasoning other decisions in this system are
-    # required to record — so it is kept on the run result and in the audit
-    # entry instead of being silently discarded.
+    # SEC-090: `note` is the operator's "why" for this run, kept on the run result
+    # and in the audit entries rather than being discarded.
     if body.dry_run:
+        agent = _automation_agent(conn)
+        if not agent:
+            raise HTTPException(503, {"code": "automation_agent_missing",
+                                      "message": f"agent '{AUTOMATION_AGENT_NAME}' not registered"})
+        plan = policy.plan_task(conn, agent, {"steps": db.jload(pb["steps"], [])}, _actor(user))
         conn.execute("UPDATE playbook_runs SET status = 'completed', finished_at = ?, result = ? WHERE id = ?",
                      (now, db.jdump({"dry_run": True, "plan": plan, "executed": False,
                                      "note": body.note}), run_id))
@@ -102,43 +148,56 @@ def run_playbook(pb_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.
                      detail={"run_id": run_id, "note": body.note})
         return {"run_id": run_id, "dry_run": True, "plan": plan, "note": body.note}
 
-    if plan["status"] == "denied":
+    try:
+        return _plan_and_execute(conn, pb, run_id, _actor(user), body.note)
+    except RuntimeError as e:
         conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? WHERE id = ?",
-                     (now, db.jdump({"error": "denied", "reasons": plan["reasons"],
-                                     "note": body.note}), run_id))
+                     (db.utcnow(), db.jdump({"error": str(e)}), run_id))
         conn.commit()
-        record_audit(conn, _actor(user), "playbook.failed", target_type="playbook", target_id=str(pb_id),
-                     detail={"reasons": plan["reasons"][:5], "note": body.note})
-        return {"run_id": run_id, "status": "denied", "reasons": plan["reasons"]}
+        raise HTTPException(503, {"code": "automation_agent_missing", "message": str(e)}) from e
 
-    if plan["status"] == "awaiting_approval":
-        for step in plan["steps"]:
-            if not policy.TOOL_REGISTRY[step["tool"]]["read_only"]:
-                # SEC-094: the schema documents this column as the owning row
-                # (agent_tasks.id for agent approvals, playbook_runs.id for
-                # automation) but the code wrote 0 — so the approval could not be
-                # linked back to its run by the queue or the decision handler.
-                conn.execute("INSERT INTO approvals (task_id, action, status, requested_by, created_at) "
-                             "VALUES (?, ?, 'pending', ?, ?)",
-                             (run_id, f"playbook:{pb['name']}:{step['tool']}", user["username"], now))
-        conn.execute("UPDATE playbook_runs SET status = 'pending', result = ? WHERE id = ?",
-                     (db.jdump({"awaiting_approval": True, "plan": plan, "note": body.note}), run_id))
-        conn.commit()
-        record_audit(conn, _actor(user), "playbook.awaiting_approval", target_type="playbook",
-                     target_id=str(pb_id), detail={"run_id": run_id, "note": body.note})
-        return {"run_id": run_id, "status": "awaiting_approval", "reasons": plan["reasons"]}
 
-    # Execute read-only steps.
-    task = {"id": run_id, "request": db.jdump({"steps": plan["steps"]})}
-    result = policy.execute_task(conn, task, agent)
-    result["note"] = body.note
-    status = "completed" if not result.get("errors") else "failed"
-    conn.execute("UPDATE playbook_runs SET status = ?, finished_at = ?, result = ? WHERE id = ?",
-                 (status, db.utcnow(), db.jdump(result), run_id))
+@router.post("/runs/{run_id}/execute")
+def execute_run(run_id: int, body: RunIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("automation.run"))):
+    """Start a run that exists but has not been planned yet (SEC-096).
+
+    Alert triggers record a run per matching playbook; with `auto_run = 1` the run
+    is executed immediately, otherwise it is left as a *suggestion*. This endpoint
+    is how an operator acts on a suggestion — before it existed, those rows sat
+    `pending` forever with no way to progress them.
+    """
+    run = db.one(conn, "SELECT * FROM playbook_runs WHERE id = ?", (run_id,))
+    if not run:
+        raise HTTPException(404, {"code": "not_found"})
+    if run["status"] != "pending" or run["started_at"] is None:
+        raise HTTPException(409, {"code": "not_pending",
+                                  "message": f"run {run_id} is {run['status']}"})
+    if (db.jload(run.get("result"), {}) or {}).get("awaiting_approval"):
+        raise HTTPException(409, {"code": "awaiting_approval",
+                                  "message": "this run is waiting on human approvals"})
+    claim = conn.execute("UPDATE playbook_runs SET status = 'running' WHERE id = ? AND status = 'pending'",
+                         (run_id,))
+    if claim.rowcount != 1:
+        conn.rollback()
+        raise HTTPException(409, {"code": "not_pending", "message": "another request claimed this run"})
     conn.commit()
-    record_audit(conn, _actor(user), f"playbook.{status}", target_type="playbook", target_id=str(pb_id),
-                 detail={"run_id": run_id, "errors": result.get("errors", [])[:5], "note": body.note})
-    return {"run_id": run_id, "status": status, "result": result, "note": body.note}
+    pb = db.one(conn, "SELECT * FROM playbooks WHERE id = ?", (run["playbook_id"],))
+    if not pb:
+        conn.execute("UPDATE playbook_runs SET status = 'failed', result = ? WHERE id = ?",
+                     (db.jdump({"error": "playbook deleted"}), run_id))
+        conn.commit()
+        raise HTTPException(409, {"code": "missing_playbook"})
+    record_audit(conn, _actor(user), "playbook.run_started", target_type="playbook",
+                 target_id=str(pb["id"]), detail={"run_id": run_id, "trigger": run["trigger"],
+                                                  "note": body.note})
+    try:
+        return _plan_and_execute(conn, pb, run_id, _actor(user), body.note)
+    except RuntimeError as e:
+        conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, result = ? WHERE id = ?",
+                     (db.utcnow(), db.jdump({"error": str(e)}), run_id))
+        conn.commit()
+        raise HTTPException(503, {"code": "automation_agent_missing", "message": str(e)}) from e
 
 
 @router.get("/runs")
@@ -168,7 +227,36 @@ def _trigger_on_alert(conn, raised_alerts: list[dict]) -> None:
         for p in plays:
             need = p["trigger"].split(":", 1)[1].lower()
             if sev_rank.get(a.get("severity", "info"), 0) >= sev_rank.get(need, 99):
-                conn.execute(
+                # SEC-096: this inserted a `pending` run and nothing else — no
+                # plan, no approvals, no execution, and no endpoint to progress
+                # it — so every triggered run was inert forever, including the
+                # ones whose playbook has `auto_run = 1`.
+                cur = conn.execute(
                     "INSERT INTO playbook_runs (playbook_id, trigger, status, started_at) VALUES (?, ?, 'pending', ?)",
                     (p["id"], f"on_alert:{a['id']}", db.utcnow()))
+                run_id = int(cur.lastrowid)
                 conn.commit()
+                trigger_actor = {"type": "system", "id": None, "name": "automation-trigger"}
+                if p["auto_run"]:
+                    try:
+                        outcome = _plan_and_execute(conn, p, run_id, trigger_actor, None)
+                        record_audit(conn, trigger_actor, "playbook.triggered", target_type="playbook",
+                                     target_id=str(p["id"]),
+                                     detail={"run_id": run_id, "alert_id": a["id"],
+                                             "severity": a.get("severity"),
+                                             "auto_run": True, "outcome": outcome["status"]})
+                    except Exception as e:  # a broken playbook must not break ingest
+                        conn.execute("UPDATE playbook_runs SET status = 'failed', finished_at = ?, "
+                                     "result = ? WHERE id = ?",
+                                     (db.utcnow(), db.jdump({"error": f"{type(e).__name__}: {e}"}), run_id))
+                        conn.commit()
+                        record_audit(conn, trigger_actor, "playbook.failed", target_type="playbook",
+                                     target_id=str(p["id"]),
+                                     detail={"run_id": run_id, "alert_id": a["id"],
+                                             "error": f"{type(e).__name__}: {e}"[:200]})
+                else:
+                    record_audit(conn, trigger_actor, "playbook.triggered", target_type="playbook",
+                                 target_id=str(p["id"]),
+                                 detail={"run_id": run_id, "alert_id": a["id"],
+                                         "severity": a.get("severity"), "auto_run": False,
+                                         "suggested": True})

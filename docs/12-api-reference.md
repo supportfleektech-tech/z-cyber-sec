@@ -237,6 +237,20 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## Playbook runs
+
+Alerts with severity `>=` a playbook's `on_alert:<severity>` threshold create a
+run (scheduled/manual runs come from their own paths). If the playbook has
+`auto_run = 1` the run is planned and executed immediately — read-only plans run,
+plans with consequential steps wait on approvals, denied plans fail with reasons —
+and every trigger is audited as `playbook.triggered` with the alert id, severity,
+`auto_run` and outcome. Otherwise the run is created `pending` as a **suggestion**
+and `POST /runs/{id}/execute` starts it (`automation.run`). That endpoint
+compare-and-set claims the run, returns `409 not_pending` once it has started, and
+refuses a run that is waiting on human approvals (`409 awaiting_approval`). Before
+SEC-096 triggered runs were created and then never planned, executed or
+progressable by any endpoint.
+
 ## Approvals
 
 `GET /api/agents/approvals?status=pending` returns every pending approval with

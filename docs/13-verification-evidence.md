@@ -843,10 +843,13 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-**Current totals:** **271 tests pass** (`pytest -q`, ~4 min), ruff clean,
+Suite 271 → **272 passed** (1 new: alert trigger runs auto playbooks and suggests
+the rest), ruff clean.
+
+**Current totals:** **272 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(292.45 kB / 81.56 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-095 series was reproduced first (as a failing check or a live request) and
+(292.74 kB / 81.61 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-096 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1165,3 +1168,33 @@ without arguments now passes for all of them (the consequential tools are
 skipped), and live an agent task using `query_events` with a filter completes and
 returns 8 events; the playbook run above executed all three steps with
 `errors: []`.
+
+### SEC-096 — alert-triggered playbook runs were inert (fixed)
+
+Found by following the SEC-094 thread to the other way a run is created. Live
+evidence in the seeded database: three `playbook_runs` rows sitting at `pending`
+with `trigger: on_alert:N` and **no result at all**.
+
+**Was:** `_trigger_on_alert` inserted a `pending` run and nothing else — it never
+planned the task, never raised the approvals a consequential plan needs, never
+executed a read-only plan, and there was **no endpoint that could progress such a
+run**. So every triggered run was inert forever, including `auto_run = 1`
+playbooks: the seeded `alert-triggered` rows, and `exfil-response-check`
+(`on_alert:critical`, `auto_run = 1`) after a critical alert, all stayed `pending`.
+
+**Fixed:** the plan/execute/await logic is one shared helper
+(`_plan_and_execute`) used by the manual endpoint, the trigger, and a new
+`POST /api/automation/runs/{id}/execute`. The trigger now honours `auto_run`
+(executing read-only plans, waiting on approvals for consequential ones, failing
+loudly on a denied plan) and always audits `playbook.triggered` with the alert id,
+severity and outcome; runs that are *not* auto-run are left as actionable
+suggestions. The execute endpoint claims the run with a compare-and-set and
+refuses a run that is already awaiting approval (`409 awaiting_approval`), and the
+SPA's run table gained a **Run** action for suggestions.
+
+**Live (after fix):** a high alert → run 7 `pending` (suggested, audited
+`{auto_run: false, suggested: true}`) → `POST /runs/7/execute` → `completed` with
+both read-only tools executed; a critical alert → run 9 auto-triggered
+(`{auto_run: true, outcome: awaiting_approval}`), an approval raised with
+`kind: playbook`, force-execute refused `409 awaiting_approval`, and approving it
+completed the run.
