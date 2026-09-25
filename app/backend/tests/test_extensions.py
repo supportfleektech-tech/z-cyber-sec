@@ -333,3 +333,63 @@ def test_release_decision_recorded_and_gates_rollout(client, conn):
     assert client.post("/api/admin/releases",
                        json={"version": "1.2.0", "commit_sha": _FAKE_COMMIT,
                              "checklist_sha256": _FAKE_SHA, "decision": "maybe"}).status_code == 422
+
+
+def test_failing_schedule_is_recorded_and_retried_on_cadence(client, conn):
+    """SEC-098: a schedule whose build raises used to be retried on every scheduler
+    tick forever and recorded nowhere. Live repro before the fix: a `cases` schedule
+    with `filters={"status": {"a": 1}}` (bound straight into SQL by the builder)
+    answered `{"built": 0}` for every pass, left `last_run_at` NULL, kept its overdue
+    `next_run_at` (so the 30s daemon retried it forever), wrote no audit event, and
+    the row carried no error at all."""
+    from app import db
+
+    r = client.post("/api/reports/schedules",
+                    json={"kind": "cases", "filters": {"status": {"a": 1}}, "interval_minutes": 5})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_filters", r.text
+
+    # Unsupported keys are refused too — the builder would silently ignore them,
+    # so the report would not mean what the schedule says.
+    r = client.post("/api/reports/schedules", json={"kind": "overview", "filters": {"severity": "high"}})
+    assert r.status_code == 400 and "not used by a overview report" in r.json()["detail"]["message"]
+    # A supported key with a bad value is refused as well.
+    assert client.post("/api/reports/schedules",
+                       json={"kind": "soc", "filters": {"severity": "urgent"}}).status_code == 400
+
+    # A schedule that is valid but whose build fails at runtime must still report
+    # itself: force a failure by deleting the reports table row the builder reads.
+    ok = client.post("/api/reports/schedules",
+                     json={"kind": "overview", "interval_minutes": 5}).json()
+    conn.execute("ALTER TABLE alerts RENAME TO alerts_moved")
+    conn.commit()
+    conn.execute("UPDATE report_schedules SET next_run_at = ? WHERE id = ?", ("2000-01-01T00:00:00Z", ok["id"]))
+    conn.commit()
+
+    out = client.post("/api/reports/schedules/run-due").json()
+    assert out["built"] == 0
+    assert [f["id"] for f in out["failed"]] == [ok["id"]] and "alerts" in out["failed"][0]["error"]
+
+    row = conn.execute("SELECT * FROM report_schedules WHERE id = ?", (ok["id"],)).fetchone()
+    assert row["failures"] == 1 and row["last_error"]
+    assert row["last_run_at"] is not None
+    # Retried on its own cadence (5 min in the future), not on every tick.
+    assert row["next_run_at"] > db.utcnow()
+    failed_audit = conn.execute("SELECT target_id, detail FROM audit_events "
+                                "WHERE action = 'report.scheduled_failed' ORDER BY seq DESC LIMIT 1").fetchone()
+    assert failed_audit and failed_audit["target_id"] == str(ok["id"])
+    assert "no such table: alerts" in failed_audit["detail"]
+
+    # A second pass has nothing due — and now says so truthfully.
+    out2 = client.post("/api/reports/schedules/run-due").json()
+    assert out2 == {"built": 0, "failed": []}
+
+    # Repair the database: the schedule heals itself and clears its error state.
+    conn.execute("ALTER TABLE alerts_moved RENAME TO alerts")
+    conn.commit()
+    conn.execute("UPDATE report_schedules SET next_run_at = ? WHERE id = ?", ("2000-01-01T00:00:00Z", ok["id"]))
+    conn.commit()
+    out3 = client.post("/api/reports/schedules/run-due").json()
+    assert out3["built"] == 1 and out3["failed"] == []
+    row = conn.execute("SELECT * FROM report_schedules WHERE id = ?", (ok["id"],)).fetchone()
+    assert row["failures"] == 0 and row["last_error"] is None
+    assert row["next_run_at"] > db.utcnow()

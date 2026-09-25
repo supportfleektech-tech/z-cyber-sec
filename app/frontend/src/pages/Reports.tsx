@@ -27,6 +27,10 @@ interface Schedule {
   next_run_at: string | null;
   status: string;
   created_by: string;
+  // SEC-098: a failing schedule used to be invisible — it retried every tick
+  // with nothing recorded, so "nothing was produced" had no explanation.
+  failures: number;
+  last_error: string | null;
 }
 
 const KINDS = ["overview", "soc", "cases", "intel", "vulns", "tradecraft"];
@@ -148,7 +152,7 @@ function Schedules({ onRan }: { onRan: () => void }) {
       <LoadBlock loading={list.loading} error={list.error} empty={!list.data?.items?.length}>
         <table className="tbl">
           <thead>
-            <tr><th>Title</th><th>Kind</th><th>Interval</th><th>Last run</th><th>Next run</th><th>Status</th><th></th></tr>
+            <tr><th>Title</th><th>Kind</th><th>Interval</th><th>Last run</th><th>Next run</th><th>Status</th><th>Last error</th><th></th></tr>
           </thead>
           <tbody>
             {list.data!.items.map((s) => (
@@ -159,6 +163,16 @@ function Schedules({ onRan }: { onRan: () => void }) {
                 <td className="dim">{s.last_run_at ? fmtTs(s.last_run_at) : "—"}</td>
                 <td className="dim">{s.next_run_at ? fmtTs(s.next_run_at) : "—"}</td>
                 <td><StBadge value={s.status} /></td>
+                <td className="dim" style={{ maxWidth: 320 }}>
+                  {s.failures
+                    ? `failed ${s.failures}× — retries ${s.next_run_at ? fmtTs(s.next_run_at) : ""}`
+                    : "—"}
+                  {s.last_error ? (
+                    <div className="mono dim" style={{ fontSize: 11 }} title={s.last_error}>
+                      {s.last_error.slice(0, 90)}
+                    </div>
+                  ) : null}
+                </td>
                 <td>
                   <button className="small"
                     onClick={async () => {

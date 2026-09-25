@@ -262,6 +262,18 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Scheduled reports
+
+A schedule stores `kind`, optional `filters` and an interval. `filters` are
+validated when the schedule is created (and when a report is generated ad hoc):
+unsupported keys, empty/non-string values, unknown severities and unknown verdicts
+are `400 bad_filters`. Every scheduler pass answers
+`{"built": n, "failed": [{id, kind, error}]}` — a failing schedule records the reason
+on its row (`last_error`, consecutive `failures`) plus an audit event
+`report.scheduled_failed`, and only retries at its next slot rather than on every
+tick; a successful run clears both fields. Before SEC-098 failures were invisible
+(no audit, no row error, `last_run_at` untouched) and retried every tick forever.
+
 ## Approvals
 
 `GET /api/agents/approvals?status=pending` returns every pending approval with

@@ -843,13 +843,14 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → 272 → **274 passed** (1 new: alert trigger runs auto playbooks and suggests
-the rest) and 272 → 274 (2 new: partial plans are refused as a whole), ruff clean.
+Suite 271 → 272 → 274 → **275 passed** (1 new: alert trigger runs auto playbooks and suggests
+the rest) 272 → 274 (2 new: partial plans are refused as a whole) and 274 → 275 (1 new: a failing
+schedule is recorded and retried on cadence), ruff clean.
 
-**Current totals:** **274 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **275 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(292.74 kB / 81.61 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-097 series was reproduced first (as a failing check or a live request) and
+(293.05 kB / 81.69 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-098 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1226,3 +1227,40 @@ allowlist: contain_asset"]`, read back as `failed {error: denied, reasons: [...]
 no `results` at all; the identical agent-task request → task `denied` with
 `tool_calls: [("contain_asset", 0)]` on that task; `tool_calls` rows with `task_id 0`
 = 0; and a fully-valid playbook still runs → `completed` with both tools.
+
+### SEC-098 — a failing report schedule retried forever and recorded nothing (fixed)
+
+Found by auditing the SEC-071 scheduler's failure path: `except Exception: continue`
+skipped the `next_run_at` advance.
+
+**Was:** a schedule whose build raises kept its overdue `next_run_at`, so the 30 s
+daemon thread retried it on **every tick, forever**. Nothing recorded the failure —
+no audit event, no error on the row, `last_run_at` stayed NULL — and
+`POST /api/reports/schedules/run-due` answered `{"built": 0}`, which is exactly what
+a healthy "nothing was due" pass answers. Live repro: a `cases` schedule with
+`filters = {"status": {"a": 1}}` (accepted at creation, then bound straight into SQL
+by the builder) produced `built=0` on every pass, `last_run_at` NULL, `next_run_at`
+still `2000-01-01`, zero `report.scheduled_failed` audits. The same bad filter on the
+ad-hoc `POST /api/reports` was an unhandled 500.
+
+**Fixed:**
+- `report_schedules` gained `failures` (consecutive) and `last_error` (migration
+  `0006`); a failing build advances `next_run_at` by the interval, records the reason
+  on the row and audits `report.scheduled_failed` with it. A successful run clears
+  both. So a broken schedule retries on its own cadence, visibly, instead of every
+  30 s invisibly.
+- `tick()`/`run-due` return `{"built": n, "failed": [{id, kind, error}]}`, so
+  "nothing due" is no longer indistinguishable from "everything due is broken".
+- Schedule creation (and ad-hoc generation) validates `filters` per kind:
+  unsupported keys and non-string values are `400 bad_filters` instead of being
+  silently ignored (`overview` ignores all filters, so `{"severity": "high"}` on an
+  overview schedule used to look like a filtered report) or exploding at runtime.
+- The Reports SPA table shows a "Last error" column.
+
+**Live (after fix):** all four bad payloads → `400` with the reason; a valid `soc`
+schedule still created; ad-hoc bad filter → `400` not `500`; the broken-runtime
+schedule → `run-due {"built": 0, "failed": [{"id": 2, "error": "OperationalError: no
+such table: alerts"}]}`, row `failures: 1` + `last_error` + `next_run_at` 5 min
+ahead, audit `report.scheduled_failed` target 2, a second pass
+`{"built": 0, "failed": []}`, and after repair `{"built": 1, "failed": []}` with the
+row cleared.
