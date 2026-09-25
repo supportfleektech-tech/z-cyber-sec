@@ -18,6 +18,11 @@ router = APIRouter(tags=["overview"])
 
 _started = time.time()
 
+# Alert statuses that mean "still needs attention" (SEC-105). Kept next to the
+# metrics so the total and the per-severity series cannot drift apart.
+_OPEN_ALERT_STATUSES = ("new", "triaging", "confirmed")
+_OPEN_ALERT_SQL = "(" + ", ".join(f"'{s}'" for s in _OPEN_ALERT_STATUSES) + ")"
+
 
 @router.get("/api/healthz")
 def healthz(conn: sqlite3.Connection = Depends(db.get_conn)):
@@ -118,12 +123,21 @@ def metrics(request: Request, conn: sqlite3.Connection = Depends(db.get_conn)):
         r = db.one(conn, sql, params)
         return int(r["c"]) if r else 0
 
-    alerts_open = c("SELECT COUNT(*) c FROM alerts WHERE status IN ('new','triaging','confirmed')")
+    # SEC-105: one definition of "open", shared by the total and the per-severity
+    # series. The labelled series used to count *every* alert of that severity, so
+    # `cybersec_alerts_open{severity="critical"} > 0` never cleared when the alert was
+    # closed — an alert that cannot resolve is worse than no alert.
+    alerts_open = c(f"SELECT COUNT(*) c FROM alerts WHERE status IN {_OPEN_ALERT_SQL}")
     cases_open = c("SELECT COUNT(*) c FROM cases WHERE status != 'closed'")
     vulns_open = c("SELECT COUNT(*) c FROM vuln_findings WHERE status IN ('new','triaged','in_progress')")
     inds_active = c("SELECT COUNT(*) c FROM threat_indicators WHERE status='active'")
     appr_pending = c("SELECT COUNT(*) c FROM approvals WHERE status='pending'")
-    sessions_active = c("SELECT COUNT(*) c FROM sessions")
+    # SEC-105: session rows are only deleted on logout, so counting rows reported
+    # expired sessions as "active" forever. Count live sessions, and surface the
+    # expired rows separately instead of hiding them in `active`.
+    now = db.utcnow()
+    sessions_active = c("SELECT COUNT(*) c FROM sessions WHERE expires_at > ?", (now,))
+    sessions_expired = c("SELECT COUNT(*) c FROM sessions WHERE expires_at <= ?", (now,))
     db_size = settings.db_path.stat().st_size if settings.db_path.exists() else 0
     lines = [
         "# CYBER-SEC metrics (Prometheus text format v0.0.4)",
@@ -137,9 +151,12 @@ def metrics(request: Request, conn: sqlite3.Connection = Depends(db.get_conn)):
         f"cybersec_indicators_active {inds_active}",
         f"cybersec_approvals_pending {appr_pending}",
         f"cybersec_sessions_active {sessions_active}",
+        f"cybersec_sessions_expired {sessions_expired}",
         f"cybersec_db_size_bytes {db_size}",
     ]
     for sev in ("critical", "high", "medium", "low", "info"):
-        n = c("SELECT COUNT(*) c FROM alerts WHERE severity = ?", (sev,))
+        n = c(f"SELECT COUNT(*) c FROM alerts WHERE severity = ? AND status IN {_OPEN_ALERT_SQL}", (sev,))
         lines.append(f'cybersec_alerts_open{{severity="{sev}"}} {n}')
+        total = c("SELECT COUNT(*) c FROM alerts WHERE severity = ?", (sev,))
+        lines.append(f'cybersec_alerts_total{{severity="{sev}"}} {total}')
     return Response("\n".join(lines) + "\n", media_type="text/plain; charset=utf-8")

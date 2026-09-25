@@ -262,6 +262,17 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Metrics
+
+`GET /metrics` (Prometheus text format; optional `METRICS_TOKEN` bearer) reports counts
+only. `cybersec_alerts_open` and `cybersec_alerts_open{severity="…"}` share one
+definition of "open" (`new`, `triaging`, `confirmed`) and sum to the same total;
+per-severity *totals* are separate, as `cybersec_alerts_total{severity="…"}`.
+`cybersec_sessions_active` counts sessions whose `expires_at` has not passed, and
+`cybersec_sessions_expired` exposes rows left behind by logouts. Before SEC-105 the
+labelled series counted every alert of a severity (so it never cleared when an alert
+was closed) and every session row counted as active.
+
 ## STIX import
 
 `POST /api/intel/indicators/stix` accepts a STIX 2.1 bundle (subset parser: ip,

@@ -843,20 +843,21 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 284 → **285 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 285 → **287 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
 an edited bundle is refused by the recorded hash, unknown provenance is reported and
 gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
 round-trips and verifies, and the seeded evidence points at a real file) 282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
-positives) and 284 → 285 (1 new: STIX imports validate confidence and normalise
-timestamps), ruff clean.
+positives) 284 → 285 (1 new: STIX imports validate confidence and normalise
+timestamps) and 285 → 287 (2 new: the labelled alert series counts only open alerts,
+and expired sessions are not active), ruff clean.
 
-**Current totals:** **285 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **287 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.63 kB / 82.17 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-104 series was reproduced first (as a failing check or a live request) and
+SEC-105 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1444,3 +1445,31 @@ back to `default_confidence`.
 2026-09-01T00:00:00Z`, `ttl_hours 8760`, `active`; `"next tuesday"` → `400 indicator 0
 valid_until: not an RFC3339 timestamp`; confidence ordering all integers; a `mutex`
 object with nonsense confidence → ignored, `created: 0`.
+
+### SEC-105 — two Prometheus series that could not tell the truth (fixed)
+
+Found by reading what each metric family actually asks the database, rather than what
+its name says.
+
+**Was (a):** `cybersec_alerts_open{severity="…"}` counted **every** alert of that
+severity — the status filter existed only on the unlabelled total. Live repro: closing
+a high alert dropped `cybersec_alerts_open` 6 → 5 while
+`cybersec_alerts_open{severity="high"}` stayed at 4. Any alerting rule written against
+the labelled series (the natural way to page on "open criticals") could therefore
+never clear, which is worse than no alert: it trains operators to ignore it.
+
+**Was (b):** `cybersec_sessions_active` was `SELECT COUNT(*) FROM sessions`, and rows
+are only deleted on logout. Live repro: with every session forced to
+`expires_at 2000-01-01`, the metric still reported 2 active sessions.
+
+**Fixed:** one shared definition of "open" (`_OPEN_ALERT_STATUSES`, next to the
+metrics so the total and the per-severity series cannot drift), used by both the total
+and the labelled series; the labelled totals are still available under their own
+honest name `cybersec_alerts_total{severity="…"}`. `cybersec_sessions_active` counts
+sessions whose `expires_at` has not passed, and the un-pruned stale rows are exposed as
+`cybersec_sessions_expired` instead of being hidden inside "active".
+
+**Live (after fix):** closing the high alert → `alerts_open` 6 → 5 **and**
+`{severity="high"}` 4 → 3, with `alerts_total{severity="high"}` holding at 4; the
+labelled open series now sum exactly to the open total (5 == 5). Expired sessions →
+active 0, expired 1; a fresh login → active 1.

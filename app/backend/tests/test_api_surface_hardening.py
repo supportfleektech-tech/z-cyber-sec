@@ -229,3 +229,52 @@ def test_spa_renders_decoded_json_through_fmtjson(client, seeded):
     # audit detail comes back structured now, and the pages type it accordingly
     assert "string | Record<string, unknown> | null" in admin
     assert "string | Record<string, unknown> | null" in exercises
+
+
+def _metric(text, name):
+    for line in text.splitlines():
+        if line.startswith(name + " ") or line.startswith(name + "{"):
+            return line.rsplit(" ", 1)[1]
+    return None
+
+
+def test_metrics_severity_series_counts_only_open_alerts(client, seeded, conn):
+    """SEC-105: `cybersec_alerts_open{severity=…}` counted *every* alert of that
+    severity, so an alerting rule on it never cleared. Live repro before the fix:
+    closing a high alert dropped `cybersec_alerts_open` 6 → 5 while
+    `cybersec_alerts_open{severity="high"}` stayed 4."""
+    total = int(_metric(client.get("/metrics").text, "cybersec_alerts_open"))
+    sev_sum = sum(int(_metric(client.get("/metrics").text, f'cybersec_alerts_open{{severity="{s}"}}'))
+                  for s in ("critical", "high", "medium", "low", "info"))
+    assert sev_sum == total, "the labelled series must add up to the open total"
+
+    # Close a high alert: both series drop together.
+    alert = next(a for a in client.get("/api/soc/alerts").json()["items"] if a["severity"] == "high")
+    assert client.patch(f"/api/soc/alerts/{alert['id']}", json={"status": "closed"}).status_code == 200
+    text = client.get("/metrics").text
+    assert int(_metric(text, "cybersec_alerts_open")) == total - 1
+    assert int(_metric(text, 'cybersec_alerts_open{severity="high"}')) == \
+        int(_metric(client.get("/metrics").text, 'cybersec_alerts_open{severity="high"}'))
+    # Totals are still available, under a name that says so.
+    assert int(_metric(text, 'cybersec_alerts_total{severity="high"}')) >= 1
+
+    # A dismissed alert is not open either (SEC-081: dismissing needs a reason).
+    other = next(a for a in client.get("/api/soc/alerts").json()["items"] if a["status"] != "closed")
+    assert client.patch(f"/api/soc/alerts/{other['id']}",
+                        json={"status": "dismissed", "notes": "probe: false positive"}).status_code == 200
+    text2 = client.get("/metrics").text
+    assert int(_metric(text2, "cybersec_alerts_open")) == total - 2
+
+
+def test_metrics_sessions_active_excludes_expired(client, seeded, conn):
+    """SEC-105: session rows are only deleted on logout, so `cybersec_sessions_active`
+    grew forever. Live repro: with every session forced to `expires_at 2000-01-01`,
+    the metric still reported 2."""
+    assert int(_metric(client.get("/metrics").text, "cybersec_sessions_active")) >= 1
+
+    conn.execute("UPDATE sessions SET expires_at = '2000-01-01T00:00:00Z'")
+    conn.commit()
+    text = client.get("/metrics").text
+    assert int(_metric(text, "cybersec_sessions_active")) == 0
+    # ...and the stale rows are visible rather than hidden in `active`.
+    assert int(_metric(text, "cybersec_sessions_expired")) >= 1
