@@ -138,3 +138,51 @@ def test_dismissing_an_alert_requires_a_reason(client, seeded, conn):
     # other statuses still need no note
     r = client.patch("/api/soc/alerts/3", json={"status": "triaging"})
     assert r.status_code == 200
+
+
+def test_alert_count_tracks_all_aggregated_events(client, seeded):
+    """SEC-093: on the update path `count` was set from the latest batch's group
+    size while `event_ids` accumulated, so an alert that had fired 8 times and
+    matched 6 more reported count=6 with 14 ids — and the SOC list column and
+    detail panel both display `count`. Live-verified before the fix:
+    (count, len(event_ids)) = (6, 14)."""
+    import json
+    from datetime import UTC, datetime
+
+    def batch(n, suffix):
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"events": [{"ts": now, "source_type": "log", "source_name": "sshd",
+                            "host": "count-tracker-01", "user": "root",
+                            "action": "ssh_failed_login", "outcome": "failure",
+                            "severity": "low", "msg": f"failed login {suffix}-{i}"} for i in range(n)]}
+
+    # first batch creates the alert (rule threshold is 5)
+    raised = client.post("/api/soc/events", json=batch(6, "a")).json()["alerts"]
+    alert = next(a for a in raised if "SSH Brute Force" in a["title"])
+    assert alert["status"] == "created" and alert["count"] == 6
+
+    # second batch aggregates into the same (rule, entity) alert
+    raised = client.post("/api/soc/events", json=batch(4, "b")).json()["alerts"]
+    updated = next(a for a in raised if "SSH Brute Force" in a["title"])
+    assert updated["status"] == "updated" and updated["count"] == 10
+
+    listed = next(a for a in client.get("/api/soc/alerts").json()["items"] if a["id"] == alert["id"])
+    assert listed["count"] == 10
+    detail = client.get(f"/api/soc/alerts/{alert['id']}").json()
+    assert detail["alert"]["count"] == len(detail["alert"]["event_ids"]) == 10
+
+    # a third batch adds its own events (count grows, still in step) ...
+    third = client.post("/api/soc/events", json=batch(4, "c")).json()
+    assert third["inserted"] == 4
+    row = db.one(seeded, "SELECT count, event_ids FROM alerts WHERE id = ?", (alert["id"],))
+    assert row["count"] == len(json.loads(row["event_ids"])) == 14
+
+    # ... and re-sending the very same batch is idempotent: skipped, no inflation
+    again = batch(4, "c")
+    for e in again["events"]:
+        e["idempotency_key"] = f"dup-{e['msg']}"
+    first = client.post("/api/soc/events", json=again).json()
+    second = client.post("/api/soc/events", json=again).json()
+    assert first["inserted"] == 4 and second["inserted"] == 0 and second["skipped"] == 4
+    row = db.one(seeded, "SELECT count, event_ids FROM alerts WHERE id = ?", (alert["id"],))
+    assert row["count"] == len(json.loads(row["event_ids"])) == 18

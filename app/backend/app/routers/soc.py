@@ -137,13 +137,18 @@ def _run_detections(conn: sqlite3.Connection, events: list[dict],
             if existing:
                 cur = db.one(conn, "SELECT * FROM alerts WHERE id = ?", (existing["id"],))
                 merged = list(dict.fromkeys((db.jload(cur["event_ids"], []) or []) + group["event_ids"]))[:500]
+                # SEC-093: `count` was set to this batch's group size while
+                # `event_ids` accumulated, so an alert that had fired 8 times and
+                # then matched 6 more reported count=6 with 14 event ids — the
+                # SOC list column and the detail panel both show `count`.
+                count = len(merged)
                 conn.execute(
                     "UPDATE alerts SET count = ?, last_seen = ?, event_ids = ?, updated_at = ? WHERE id = ?",
-                    (group["count"], group["last_seen"], db.jdump(merged), db.utcnow(), existing["id"]),
+                    (count, group["last_seen"], db.jdump(merged), db.utcnow(), existing["id"]),
                 )
                 conn.commit()
                 raised.append({"id": cur["id"], "title": title, "severity": cur["severity"],
-                               "status": "updated", "count": group["count"]})
+                               "status": "updated", "count": count})
             else:
                 cur = conn.execute(
                     "INSERT INTO alerts (rule_id, uid, title, severity, status, event_ids, first_seen, "

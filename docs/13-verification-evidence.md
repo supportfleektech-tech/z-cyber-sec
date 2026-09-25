@@ -838,10 +838,12 @@ and the SPA `fmtJson` rendering guard), ruff clean.
 Suite 265 → **267 passed** (2 new: case reopen clears `closed_at`, finding reopen
 clears `fixed_at`), ruff clean.
 
-**Current totals:** **267 tests pass** (`pytest -q`, ~4 min), ruff clean,
+Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
+
+**Current totals:** **268 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (292.27 kB / 81.50 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-092 series was reproduced first (as a failing check or a live request) and
+SEC-093 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1082,3 +1084,27 @@ too.
 **Live (after fix):** close → `closed_at` set; reopen → `closed_at: null` with the
 timeline and audit entries above; a finding returns `fixed_at: null` after
 reopening.
+
+### SEC-093 — an aggregated alert under-reported its own count (fixed)
+
+Found by cross-checking denormalized counters against the rows they summarize:
+every existing alert had `count == len(event_ids)`, because the seed writes both
+from the same group. Driving the ingest path twice broke it.
+
+**Was:** on the aggregation (update) path the router merged the new event ids into
+`event_ids` but wrote `count = group["count"]` — *this batch's* matched events,
+not the merged total. `count` is what the SOC list column and the alert detail
+panel display ("Count"), so the more an alert fired over time, the more it
+under-reported.
+
+**Live-verified before the fix:** an SSH-brute-force alert with 8 events and 8
+ids; ingesting 6 more → `(count, len(event_ids)) = (6, 14)`.
+
+**Fixed:** `count = len(merged)` (the merged, de-duplicated set), so the count and
+the id list stay in step at every aggregation, and the ingest response reports the
+same number.
+
+**Live (after fix):** 6 events → alert created with `count: 6`;
+4 more → `count: 10` with 10 ids (the old code would have said 4), the
+`/api/soc/alerts` column shows 10, and re-sending an idempotent batch inserts
+nothing and leaves the count unchanged.

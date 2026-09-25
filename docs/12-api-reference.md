@@ -237,6 +237,15 @@ are safe; at-most-once-per-interval by design.
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
 
+## Alert aggregation
+
+`POST /api/soc/events` is idempotent per `idempotency_key` and returns
+`{inserted, skipped, alerts}`. Alerts aggregate per (rule, entity) while open:
+each batch's matching events are merged into the alert's `event_ids`
+(de-duplicated, capped at 500) and `count` is the size of that merged set — so
+`count == len(event_ids)` after every batch (SEC-093; it used to be this batch's
+size, so a long-running alert under-reported how often it had fired).
+
 ## State timestamps
 
 A timestamp that records *when* a state was entered is cleared when the state is
