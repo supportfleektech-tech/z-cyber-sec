@@ -843,14 +843,15 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → 272 → 274 → **275 passed** (1 new: alert trigger runs auto playbooks and suggests
-the rest) 272 → 274 (2 new: partial plans are refused as a whole) and 274 → 275 (1 new: a failing
-schedule is recorded and retried on cadence), ruff clean.
+Suite 271 → 272 → 274 → 275 → **277 passed** (1 new: alert trigger runs auto playbooks and suggests
+the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
+schedule is recorded and retried on cadence) and 275 → 277 (2 new: deleting the anchor is
+tampering, and a full rewrite is caught by an exported anchor), ruff clean.
 
-**Current totals:** **275 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **277 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (293.05 kB / 81.69 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-098 series was reproduced first (as a failing check or a live request) and
+SEC-099 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1264,3 +1265,32 @@ such table: alerts"}]}`, row `failures: 1` + `last_error` + `next_run_at` 5 min
 ahead, audit `report.scheduled_failed` target 2, a second pass
 `{"built": 0, "failed": []}`, and after repair `{"built": 1, "failed": []}` with the
 row cleared.
+
+### SEC-099 — deleting one row (the anchor) turned a detected tamper into a pass (fixed)
+
+Found by tamper-testing the SEC-084 audit chain on copies of the demo database:
+edits, mid-log deletions, tail deletions, replenished tails and a regressed anchor
+were all detected — but `DELETE FROM audit_anchor` returned
+`ok: true, reason: "unanchored"`, and so did "delete the newest rows *and* the
+anchor", which is precisely the erasure the anchor exists to detect.
+
+**Was:** `verify_chain` treated a missing anchor as "this log may predate anchoring"
+and answered `ok: true` with a warning. That is honest for a pre-0005 database, but
+the check could not tell that case apart from an anchor that was just deleted, so one
+`DELETE` downgraded a detected truncation into a passing check — the laundering path
+SEC-084 set out to close (its anchor table was hardened against *overwrite* via the
+settings endpoint, not against deletion). Any consumer that reads `ok` — CI, a
+dashboard, an auditor's script — would report the log as intact.
+
+**Fixed:** `verify_chain` now distinguishes the two cases using the migration record,
+which is not part of the log: if `0005_audit_anchor.sql` is applied and the log is
+not empty, a missing anchor is `ok: false, reason: "anchor_missing"` with a detail
+saying why (the anchor is written with every append and removed by nothing else), and
+an anchor exported earlier is still compared on that path. A log that genuinely
+predates anchoring keeps the honest `ok: true, reason: "unanchored"` warning.
+
+**Live (after fix):** healthy log → `ok: true, rows 22, anchor head_seq 22`; after
+deleting history and the anchor → `ok: false, reason: "anchor_missing"` with the
+explanation, and `?head_seq=22&head_hash=…&rows=22` → `external {ok: false, reason:
+"missing"}`. The database was re-seeded afterwards; nothing was tampered in the
+platform's own state.

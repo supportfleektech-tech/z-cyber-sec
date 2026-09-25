@@ -113,6 +113,15 @@ def verify_against_anchor(rows, against: dict) -> dict:
     return {"ok": True, "reason": None, "head_seq": head_seq}
 
 
+def _anchoring_expected(conn) -> bool:
+    """True if this database has the anchoring migration applied (SEC-099)."""
+    try:
+        return any(r["name"] == "0005_audit_anchor.sql"
+                   for r in conn.execute("SELECT name FROM schema_migrations"))
+    except Exception:  # very old/partial DB without the table: can't conclude
+        return False
+
+
 def verify_chain(conn, against: dict | None = None) -> dict:
     """Recompute every hash and compare against the anchor.
 
@@ -121,6 +130,12 @@ def verify_chain(conn, against: dict | None = None) -> dict:
     contiguous) or `truncated` (history that the anchor recorded is gone).
     """
     rows = conn.execute("SELECT * FROM audit_events ORDER BY seq").fetchall()
+
+    def _with_external(res: dict) -> dict:
+        if against:
+            res["external"] = verify_against_anchor(rows, against)
+        return res
+
     prev = GENESIS
     expected_seq = 1
     for r in rows:
@@ -139,14 +154,28 @@ def verify_chain(conn, against: dict | None = None) -> dict:
 
     a = anchor(conn)
     if a is None:
+        if rows and _anchoring_expected(conn):
+            # SEC-099: the anchoring migration is applied and the log is not empty,
+            # so the anchor row existed and was deleted. Reporting this as an
+            # intact-but-unanchored log let a single DELETE turn a detected
+            # truncation into a passing check — the laundering path SEC-084 set out
+            # to close. Deleting history *and* its anchor is still tampering.
+            return _with_external({
+                "ok": False, "rows": len(rows), "first_bad_seq": None,
+                "reason": "anchor_missing", "anchor": None,
+                "detail": ("the anchor row is gone although the anchoring migration is applied and "
+                           "the log is not empty — the anchor is written with every append and is "
+                           "removed by nothing else, so history has been tampered with "
+                           "(compare against an anchor exported earlier to see what is missing)")})
         # A log written before the anchor existed (or a brand-new DB): the links
         # verify, but truncation cannot be ruled out for history that predates
         # anchoring. Say so instead of implying more confidence than we have.
-        return {"ok": True, "rows": len(rows), "first_bad_seq": None,
-                "reason": None if not rows else "unanchored", "anchor": None,
-                "warning": None if not rows else
-                ("no anchor recorded — an intact chain cannot rule out that history was "
-                 "truncated before anchoring began")}
+        return _with_external({
+            "ok": True, "rows": len(rows), "first_bad_seq": None,
+            "reason": None if not rows else "unanchored", "anchor": None,
+            "warning": None if not rows else
+            ("no anchor recorded — an intact chain cannot rule out that history was "
+             "truncated before anchoring began")})
     anch = {"rows": a["rows"], "head_seq": a["head_seq"], "head_hash": a["head_hash"]}
     if len(rows) < int(a["rows"]):
         return {"ok": False, "rows": len(rows), "first_bad_seq": len(rows) + 1,
@@ -154,11 +183,6 @@ def verify_chain(conn, against: dict | None = None) -> dict:
     # The furthest event history ever reached must still be there, unchanged.
     # Checking only the newest row (or the count) lets an attacker delete the
     # tail and replenish it with new activity.
-    def _with_external(res: dict) -> dict:
-        if against:
-            res["external"] = verify_against_anchor(rows, against)
-        return res
-
     head_seq = int(a["head_seq"])
     head_row = next((r for r in rows if r["seq"] == head_seq), None)
     if head_row is None or head_row["hash"] != a["head_hash"]:

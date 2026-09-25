@@ -262,6 +262,17 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Audit integrity
+
+`GET /api/admin/audit/verify` recomputes the whole hash chain and compares it with
+the anchor. Failure reasons: `linkage` (a row was modified or removed mid-log), `gap`
+(non-contiguous sequence numbers), `truncated` (anchored history is gone or replaced),
+`unaccounted` (rows beyond the anchored head) and — since SEC-099 — `anchor_missing`
+(the anchoring migration is applied and the log is not empty, yet the anchor row
+itself is gone, which only deletion can do). Pass `head_seq`, `head_hash` and
+optionally `rows` from an anchor you exported earlier (`GET /api/admin/audit/anchor`)
+to also detect a rewrite that rebuilt the chain *and* the in-database anchor.
+
 ## Scheduled reports
 
 A schedule stores `kind`, optional `filters` and an interval. `filters` are

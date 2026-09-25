@@ -336,3 +336,61 @@ def test_corrupt_bundle_is_a_clean_refusal_not_a_500(client, seeded):
     junk.unlink(missing_ok=True)
     trunc.unlink(missing_ok=True)
     assert client.get("/api/healthz").json()["ok"] is True
+
+
+def test_deleting_the_anchor_is_tampering_not_a_pass(client, seeded, conn):
+    """SEC-099: `DELETE FROM audit_anchor` used to make /audit/verify answer
+    `ok: true, reason: "unanchored"` — a single row deletion turned detected
+    truncation into a passing check, which is exactly the laundering path SEC-084
+    set out to close. Live: on a copy of the demo DB, deleting the anchor row after
+    deleting the log's tail reported ok=True (warning only)."""
+
+    assert client.get("/api/admin/audit/verify").json()["ok"] is True
+
+    # Delete history AND its anchor — the two things an attacker erasing activity
+    # would remove together.
+    conn.execute("DELETE FROM audit_events WHERE seq > 1")
+    conn.execute("DELETE FROM audit_anchor")
+    conn.commit()
+
+    v = client.get("/api/admin/audit/verify").json()
+    assert v["ok"] is False and v["reason"] == "anchor_missing", v
+    assert "anchor" in v["detail"] and v["anchor"] is None
+
+    # An anchor exported beforehand still says what the log claimed to contain.
+    exported = {"head_seq": 1, "head_hash": conn.execute(
+        "SELECT hash FROM audit_events WHERE seq = 1").fetchone()["hash"], "rows": 5}
+    v2 = client.get("/api/admin/audit/verify", params=exported).json()
+    assert v2["ok"] is False and v2["reason"] == "anchor_missing"
+    assert v2["external"]["ok"] is False and v2["external"]["reason"] == "truncated"
+
+
+def test_full_rewrite_is_caught_by_an_exported_anchor(client, seeded, conn):
+    """A rewrite that recomputes the whole chain *and* the in-DB anchor is
+    invisible to the in-DB check (the attacker rewrote the evidence) but must not
+    be invisible to a copy kept outside the platform."""
+    from app.audit import compute_hash
+
+    before = client.get("/api/admin/audit/anchor").json()["anchor"]
+    rows = [dict(r) for r in conn.execute("SELECT * FROM audit_events ORDER BY seq")]
+    head = rows[-1]
+    # Rewrite the tail event's content, then rebuild the chain and the anchor so
+    # everything verifies in-database.
+    conn.execute("DELETE FROM audit_events WHERE seq = ?", (head["seq"],))
+    detail = (head["detail"] or "{}")
+    forged_detail = detail.replace("admin", "someone-else")
+    prev = conn.execute("SELECT hash FROM audit_events WHERE seq = ?", (head["seq"] - 1,)).fetchone()["hash"]
+    forged_hash = compute_hash(head["seq"], head["ts"], head["actor_type"], head["actor_id"],
+                               head["actor_name"], head["action"], head["target_type"],
+                               head["target_id"], forged_detail, prev)
+    conn.execute("INSERT INTO audit_events (seq, ts, actor_type, actor_id, actor_name, action,"
+                 " target_type, target_id, detail, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 (head["seq"], head["ts"], head["actor_type"], head["actor_id"], head["actor_name"],
+                  head["action"], head["target_type"], head["target_id"], forged_detail, prev, forged_hash))
+    conn.execute("UPDATE audit_anchor SET head_hash = ? WHERE id = 1", (forged_hash,))
+    conn.commit()
+
+    assert client.get("/api/admin/audit/verify").json()["ok"] is True  # attacker: clean
+    v = client.get("/api/admin/audit/verify", params=before).json()
+    assert v["external"]["ok"] is False and v["external"]["reason"] == "replaced"
+    assert before["head_hash"][:8] in v["external"]["detail"]
