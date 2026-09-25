@@ -269,7 +269,8 @@ only. `cybersec_alerts_open` and `cybersec_alerts_open{severity="…"}` share on
 definition of "open" (`new`, `triaging`, `confirmed`) and sum to the same total;
 per-severity *totals* are separate, as `cybersec_alerts_total{severity="…"}`.
 `cybersec_sessions_active` counts sessions whose `expires_at` has not passed, and
-`cybersec_sessions_expired` exposes rows left behind by logouts. Before SEC-105 the
+`cybersec_sessions_expired` exposes rows left behind by logouts — a user's expired rows
+are pruned when that user logs in again. Before SEC-105 the
 labelled series counted every alert of a severity (so it never cleared when an alert
 was closed) and every session row counted as active.
 

@@ -50,11 +50,17 @@ def create_session(conn, user_id: int, ip: str | None, user_agent: str | None) -
     token = secrets.token_urlsafe(TOKEN_BYTES)
     now = datetime.now(UTC)
     expires = now + timedelta(hours=settings.token_ttl_hours)
+    now_s = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # SEC-105 follow-on: an expired session was only removed when its token was
+    # presented again, so the table grew without bound and `cybersec_sessions_active`
+    # (before the fix) counted the stale rows as live. Logging in is a moment an
+    # operator does not notice, and it is the right time to drop this user's dead rows.
+    conn.execute("DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?", (user_id, now_s))
     cur = conn.execute(
         "INSERT INTO sessions (user_id, token_hash, ip, user_agent, created_at, expires_at, last_seen_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, sha256_hex(token), ip, user_agent, now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-         expires.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ")),
+        (user_id, sha256_hex(token), ip, user_agent, now_s,
+         expires.strftime("%Y-%m-%dT%H:%M:%SZ"), now_s),
     )
     conn.commit()
     return int(cur.lastrowid), token

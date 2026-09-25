@@ -1473,3 +1473,7 @@ sessions whose `expires_at` has not passed, and the un-pruned stale rows are exp
 `{severity="high"}` 4 → 3, with `alerts_total{severity="high"}` holding at 4; the
 labelled open series now sum exactly to the open total (5 == 5). Expired sessions →
 active 0, expired 1; a fresh login → active 1.
+
+Follow-on in the same change: the stale rows were only ever removed when their token
+was presented again, so the table grew without bound. Logging in now drops that user's
+expired sessions (a moment nobody has to notice, and the only writer of them).

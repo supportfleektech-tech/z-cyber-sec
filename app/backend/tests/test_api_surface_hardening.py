@@ -278,3 +278,11 @@ def test_metrics_sessions_active_excludes_expired(client, seeded, conn):
     assert int(_metric(text, "cybersec_sessions_active")) == 0
     # ...and the stale rows are visible rather than hidden in `active`.
     assert int(_metric(text, "cybersec_sessions_expired")) >= 1
+
+    # Logging in prunes that user's dead rows, so the table does not grow without
+    # bound (they were previously only removed if their token was presented again).
+    assert client.post("/api/auth/login",
+                       json={"username": "admin", "password": "CyberSecAdmin1!"}).status_code == 200
+    after = conn.execute("SELECT expires_at FROM sessions").fetchall()
+    assert len(after) == 1, "the expired rows are pruned, one live row remains"
+    assert after[0]["expires_at"] > "2026-01-01T00:00:00Z"
