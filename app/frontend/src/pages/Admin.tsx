@@ -364,7 +364,7 @@ function BackupTab({ onFlash }: { onFlash: (m: string, ok?: boolean) => void }) 
         >
           {busy ? "Backing up…" : "Take backup"}
         </button>
-        <span className="faint">writes to data/backups with sha256 checksum</span>
+        <span className="faint">writes a .tar.gz bundle to data/backups with sha256 checksums</span>
       </div>
       {lastBackup && (
         <div className="note-box mt">
@@ -375,11 +375,37 @@ function BackupTab({ onFlash }: { onFlash: (m: string, ok?: boolean) => void }) 
       <div className="mt">
         <label className="f">Restore from backup file path</label>
         <div className="row">
-          <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/…/data/backups/cybersec-….db" style={{ width: 380 }} />
+          <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/…/data/backups/cybersec-….tar.gz" style={{ width: 380 }} />
+          {/* SEC-100: check a bundle without restoring it — compares the archive with
+              the sha256 the audit log recorded when it was created. */}
+          <button
+            className="small"
+            disabled={!path}
+            onClick={async () => {
+              try {
+                const v = await api.post<{
+                  ok: boolean; error?: string; bad?: string[]; files?: number;
+                  recorded?: { found: boolean; matches?: boolean; note?: string };
+                }>("/api/admin/backup/verify", { path });
+                const rec = v.recorded;
+                onFlash(
+                  v.ok
+                    ? `Bundle verifies (${v.files ?? 0} files)` +
+                      (rec && !rec.found ? ` — ${rec.note}` : "")
+                    : (v.error || `Bundle failed verification: ${(v.bad || []).join("; ")}`),
+                  v.ok,
+                );
+              } catch (e) {
+                onFlash((e as Error).message, false);
+              }
+            }}
+          >
+            Check
+          </button>
           <ConfirmButton
             label="Restore"
             confirmLabel="Restore the database from this backup file? Current data will be replaced."
-            impact="Irreversible for the live database (a fresh backup should be taken first). The API refuses paths outside data/backups and requires the literal confirm token."
+            impact="Irreversible for the live database (a fresh backup should be taken first). The API refuses paths outside data/backups, requires the literal confirm token, and refuses a bundle that was modified after creation or that it has no recorded creation hash for."
             danger
             onConfirm={async () => {
               const out = await api.post("/api/admin/backup/restore", { path, confirm: "RESTORE" });

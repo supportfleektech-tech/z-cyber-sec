@@ -262,6 +262,21 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Backups
+
+`POST /api/admin/backup` writes a `.tar.gz` bundle (snapshot + evidence + manifest of
+sha256 checksums) and records the archive's sha256 in the audit log.
+`POST /api/admin/backup/verify` checks a bundle inside the backups directory without
+restoring it: in-bundle consistency (manifest, checksums, no unlisted or unsafe
+members) **and** the recorded hash. `POST /api/admin/backup/restore`
+(`confirm: "RESTORE"`) refuses an edited bundle (`409 verify_failed`) and, unless
+`allow_unrecorded: true` is passed explicitly, a bundle with no recorded creation
+hash (`409 unrecorded_bundle`) — that case covers importing a bundle built elsewhere,
+which is not evidence of tampering but is not verifiable either. The retention report
+(`GET /api/admin/retention/report`) lists bundles with `sha256`, `matches_recorded`
+and `verifies`. Before SEC-100 the recorded hash was consulted by nothing, so a
+bundle whose manifest was rewritten verified clean and could be restored.
+
 ## Audit integrity
 
 `GET /api/admin/audit/verify` recomputes the whole hash chain and compares it with

@@ -843,15 +843,17 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → 272 → 274 → 275 → **277 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 277 → **280 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
-schedule is recorded and retried on cadence) and 275 → 277 (2 new: deleting the anchor is
-tampering, and a full rewrite is caught by an exported anchor), ruff clean.
+schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
+tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
+an edited bundle is refused by the recorded hash, unknown provenance is reported and
+gated, and the inventory lists bundles), ruff clean.
 
-**Current totals:** **277 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **280 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(293.05 kB / 81.69 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-099 series was reproduced first (as a failing check or a live request) and
+(293.51 kB / 81.86 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-101 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1294,3 +1296,59 @@ deleting history and the anchor → `ok: false, reason: "anchor_missing"` with t
 explanation, and `?head_seq=22&head_hash=…&rows=22` → `external {ok: false, reason:
 "missing"}`. The database was re-seeded afterwards; nothing was tampered in the
 platform's own state.
+
+### SEC-100 — a backup bundle could be edited after creation and still verified (fixed)
+
+Found by auditing what a bundle's manifest can and cannot prove. Everything in it
+travels *inside* the archive, so it can be edited together with the files it
+describes.
+
+**Was:** `verify_bundle` checked the archive against its own manifest, and the
+sha256 that `create_backup` recorded in the hash-chained audit log was consulted by
+nothing. Live repro on the demo database: the bundle's `cybersec.db` was swapped for
+one containing an extra `backdoor` admin, the manifest's checksum for it was
+recomputed, and the result verified `ok: true` — then
+`POST /api/admin/backup/restore` accepted it and the live user list gained the
+account. The edit was undetectable by the platform even though it had recorded the
+original hash.
+
+**Fixed:** `verify_bundle(conn, …)` now compares the archive against the sha256
+recorded in the audit log at creation, matching content-first (a file name is not
+evidence):
+
+| case | result |
+|---|---|
+| untouched | `ok`, `recorded.matched_by: "name"`, hash matches |
+| edited in place (manifest fixed up) | `ok: false`, `"modified: sha256 differs from the hash recorded when this backup was created"` |
+| edited **and renamed** (so nothing recorded matches by name or content) | `ok: true` but `recorded.found: false` with a note — provenance unknown, not proof of tampering |
+| renamed but untouched | `ok`, `recorded.matched_by: "content"` |
+
+`POST /api/admin/backup/restore` passes its connection through, so an edited bundle
+is refused `409 verify_failed`, and a bundle of unknown provenance is refused
+`409 unrecorded_bundle` unless the operator passes `allow_unrecorded: true` — the
+disaster-recovery case (a bundle built elsewhere, or restored onto a rebuilt
+platform) stays possible but is now a deliberate, audited act. A new
+`POST /api/admin/backup/verify` checks any bundle inside the backups directory
+without restoring it, and the Admin SPA gained the matching **Check** action.
+
+**Live (after fix):** untouched bundle → `ok, matched_by name`; edited in place →
+`verify ok: false` naming both hashes, `restore 409 verify_failed`; edited and
+renamed → `restore 409 unrecorded_bundle`; renamed-but-untouched copy →
+`matched_by: content` and restore succeeds; the live user list never gained the
+`backdoor` account.
+
+### SEC-101 — the backup inventory reported zero backups (fixed)
+
+Found while reading the same code path: `create_backup` packs the snapshot into
+`<stamp>.tar.gz` and deletes the intermediate `.db`, but
+`GET /api/admin/retention/report` globbed `*.db` in the backups directory.
+
+**Was:** live, with one bundle on disk, the report answered
+`backups: {"total": 0, "items": []}` — the retention report an operator checks said
+there were no backups at all, and it had no hash or verification state to show even
+when it did list something.
+
+**Fixed:** the inventory lists `*.tar.gz` bundles (tagged `kind: "bundle"`, with
+`sha256`, `matches_recorded` and `verifies` from the SEC-100 check) and any stray
+`.db` files. Live: `total: 1` with the bundle, `matches_recorded: true`,
+`verifies: true`.

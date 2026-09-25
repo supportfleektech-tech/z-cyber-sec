@@ -209,9 +209,47 @@ def backup(conn: sqlite3.Connection = Depends(db.get_conn),
     return create_backup(conn, _actor(user))
 
 
+def _checked_backup_path(raw: str) -> Path:
+    """Resolve a caller-supplied bundle path, requiring it to be inside backups.
+
+    SEC-085: this used to be `"backups" not in str(path)` — a substring test, so
+    any path that merely *mentions* backups (e.g. /tmp/evil-backups/x or
+    /backups/../../elsewhere/y) passed while the message claimed containment.
+    """
+    path = Path(raw)
+    backups_dir = settings.backups_dir.resolve()
+    resolved = path.resolve() if path.exists() else None
+    if resolved is None or not resolved.is_file() or \
+            (resolved != backups_dir and backups_dir not in resolved.parents):
+        raise HTTPException(400, {
+            "code": "bad_path",
+            "message": f"path must be an existing file inside the backups directory ({backups_dir})"})
+    return path
+
+
+@router.post("/backup/verify")
+def verify_backup(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                  user: dict = Depends(require("admin.backup"))):
+    """Check a bundle without restoring it (SEC-100).
+
+    Compares the archive against the sha256 the hash-chained audit log recorded
+    when it was created, so a bundle edited after creation (its manifest can be
+    edited with it) is refused here and by the restore gate.
+    """
+    path = _checked_backup_path(body.path)
+    out = verify_bundle(conn, path)
+    out["path"] = str(path)
+    return out
+
+
 class RestoreIn(BaseModel):
     path: str
     confirm: str = Field(default="", description="Must be the literal 'RESTORE' to proceed.")
+    # SEC-100: a bundle this log has no creation record for cannot be checked against
+    # the hash the platform recorded. Restoring one is a deliberate act (disaster
+    # recovery from a bundle built elsewhere), so it needs an explicit flag.
+    allow_unrecorded: bool = Field(default=False,
+                                   description="Restore a bundle with no recorded creation hash.")
 
 
 @router.post("/backup/restore")
@@ -220,19 +258,8 @@ def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
     if body.confirm != "RESTORE":
         raise HTTPException(400, {"code": "confirm_required",
                                   "message": "Set confirm='RESTORE' — this replaces live data."})
-    # SEC-085: this used to be `"backups" not in str(path)` — a substring test,
-    # so any path that merely *mentions* backups (e.g. /tmp/evil-backups/x or
-    # /backups/../../elsewhere/y) passed while the message claimed containment.
-    # Resolve and require real containment in the backups directory.
-    path = Path(body.path)
-    backups_dir = settings.backups_dir.resolve()
-    resolved = path.resolve() if path.exists() else None
-    if resolved is None or not resolved.is_file() or \
-            (resolved != backups_dir and backups_dir not in resolved.parents):
-        raise HTTPException(400, {
-            "code": "bad_path",
-            "message": f"path must be an existing file inside the backups directory ({backups_dir})"})
-    v = verify_bundle(None, path)
+    path = _checked_backup_path(body.path)
+    v = verify_bundle(conn, path)
     if not v["ok"]:
         # SEC-086: `message` used to be `str(v.get("bad"))`, which renders as
         # "None" for bundles rejected with an `error` (unreadable, no manifest) —
@@ -240,11 +267,16 @@ def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
         raise HTTPException(409, {
             "code": "verify_failed",
             "message": v.get("error") or f"bundle contents failed verification: {v.get('bad')}"})
+    if not (v.get("recorded") or {}).get("found") and not body.allow_unrecorded:
+        raise HTTPException(409, {
+            "code": "unrecorded_bundle",
+            "message": ((v.get("recorded") or {}).get("note") or "no recorded creation hash") +
+                       " — pass allow_unrecorded=true only if you verified the bundle elsewhere"})
     # Quiesce: close all per-request connections for this process, then restore.
     import app.db as dbmod
     try:
         with dbmod._lock:
-            result = restore_from(path, _actor(user))
+            result = restore_from(path, _actor(user), conn)
     except RuntimeError as e:      # SEC-086: defence-in-depth refusals are 409, not 500
         raise HTTPException(409, {"code": "restore_refused",
                                   "message": str(e)[:300]}) from e
@@ -298,10 +330,23 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
     backups_dir = settings.backups_dir
     backups = []
     if backups_dir.exists():
-        for f in sorted(backups_dir.glob("*.db")):
+        # SEC-101: `create_backup` packs everything into `<name>.tar.gz` and removes
+        # the intermediate `.db`, so globbing `*.db` reported `total: 0` while
+        # backups existed — the one report an operator checks claimed there were no
+        # backups at all.
+        for f in sorted(list(backups_dir.glob("*.tar.gz")) + list(backups_dir.glob("*.db"))):
             age_days = (datetime.now(UTC).timestamp() - f.stat().st_mtime) / 86400
-            backups.append({"name": f.name, "size_bytes": f.stat().st_size,
-                            "age_days": round(age_days, 1)})
+            entry = {"name": f.name, "size_bytes": f.stat().st_size,
+                     "age_days": round(age_days, 1),
+                     "kind": "bundle" if f.name.endswith(".tar.gz") else "db"}
+            if entry["kind"] == "bundle":
+                # Cross-check against the hash recorded at creation (SEC-100), so a
+                # backup that was edited afterwards is visible here too.
+                v = verify_bundle(conn, f)
+                entry["sha256"] = (v.get("recorded") or {}).get("actual") or ""
+                entry["matches_recorded"] = (v.get("recorded") or {}).get("matches")
+                entry["verifies"] = bool(v.get("ok"))
+            backups.append(entry)
     return {
         "generated_at": now,
         "evidence": {

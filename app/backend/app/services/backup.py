@@ -116,9 +116,68 @@ def verify_bundle(conn, tar_path: Path) -> dict:
     # operational case, so it is reported as a failed verification.
     try:
         with tarfile.open(tar_path, "r:gz") as tar:
-            return _verify_open_bundle(tar)
+            result = _verify_open_bundle(tar)
     except (tarfile.TarError, OSError, json.JSONDecodeError, KeyError, EOFError) as e:
         return {"ok": False, "error": f"unreadable bundle: {type(e).__name__}: {e}"[:200]}
+    if conn is not None:
+        result = _check_recorded_hash(conn, tar_path, result)
+    return result
+
+
+def _check_recorded_hash(conn, tar_path: Path, result: dict) -> dict:
+    """Compare the bundle with the hashes recorded when backups were created (SEC-100).
+
+    The manifest travels *inside* the bundle, so it can be edited along with any file
+    it describes: a bundle whose database was swapped for one holding an extra admin
+    user verified clean, and restoring it installed that account. The hash-chained
+    audit log recorded each bundle's sha256 at creation and cannot be rewritten
+    without breaking the chain, so compare against it.
+
+    Matching is content-first, because a file name is not evidence:
+      - same name, different hash -> modified in place (fail)
+      - different name, same hash -> this platform's bundle, renamed (ok)
+      - neither name nor content matches a recorded bundle -> provenance unknown: not
+        proof of tampering (it may have been built elsewhere, or the platform's
+        database rebuilt), reported as such, and refused by the restore gate unless
+        the operator explicitly overrides it.
+    """
+    rows = conn.execute("SELECT target_id, detail FROM audit_events "
+                        "WHERE action = 'backup.created' ORDER BY seq DESC").fetchall()
+    recorded: dict[str, str] = {}
+    for r in rows:
+        h = (db.jload(r["detail"], {}) or {}).get("sha256")
+        if h and r["target_id"] and r["target_id"] not in recorded:
+            recorded[r["target_id"]] = h
+    actual = _sha256(tar_path)
+    if not recorded:
+        result["recorded"] = {
+            "found": False, "actual": actual,
+            "note": ("this log records no created backups, so the bundle's hash cannot be "
+                     "compared with one the platform recorded")}
+        return result
+    expected = recorded.get(tar_path.name)
+    if expected:
+        result["recorded"] = {"found": True, "matched_by": "name", "expected": expected,
+                              "actual": actual, "matches": actual == expected}
+        if actual != expected:
+            result["ok"] = False
+            bad = list(result.get("bad") or [])
+            bad.append("modified: sha256 differs from the hash recorded when this backup was created")
+            result["bad"] = bad[:10]
+            result["error"] = ("bundle was modified after it was created: it hashes to "
+                               f"{actual[:16]}…, the audit log recorded {expected[:16]}…")
+        return result
+    if actual in set(recorded.values()):
+        result["recorded"] = {"found": True, "matched_by": "content", "expected": actual,
+                              "actual": actual, "matches": True,
+                              "note": "renamed, but the content is a bundle this platform created"}
+        return result
+    result["recorded"] = {
+        "found": False, "actual": actual, "known_bundles": len(recorded),
+        "note": (f"neither the name nor the content matches any of the {len(recorded)} bundle(s) "
+                 "this platform recorded — it was built elsewhere, or edited and renamed; restoring "
+                 "it needs the explicit override")}
+    return result
 
 
 def _verify_open_bundle(tar) -> dict:
@@ -154,9 +213,13 @@ def _verify_open_bundle(tar) -> dict:
     return {"ok": not bad, "bad": bad[:10], "files": len(manifest["files"])}
 
 
-def restore_from(tar_path: Path, actor: dict) -> dict:
-    """Replace the live DB with the backup's DB. Caller must close connections."""
-    v = verify_bundle(None, tar_path)
+def restore_from(tar_path: Path, actor: dict, conn=None) -> dict:
+    """Replace the live DB with the backup's DB. Caller must close connections.
+
+    `conn` (SEC-100) lets the pre-restore check compare the bundle against the hash
+    the audit log recorded for it.
+    """
+    v = verify_bundle(conn, tar_path)
     if not v["ok"]:
         raise RuntimeError(f"backup failed verification: {v.get('bad')}")
     with tarfile.open(tar_path, "r:gz") as tar:

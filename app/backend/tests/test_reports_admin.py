@@ -394,3 +394,169 @@ def test_full_rewrite_is_caught_by_an_exported_anchor(client, seeded, conn):
     v = client.get("/api/admin/audit/verify", params=before).json()
     assert v["external"]["ok"] is False and v["external"]["reason"] == "replaced"
     assert before["head_hash"][:8] in v["external"]["detail"]
+
+
+def _edit_bundle(src, dst):
+    """Rebuild a bundle with the DB replaced by one holding an extra admin, and the
+    manifest's checksums recomputed so every in-bundle check passes."""
+    import hashlib as _hash
+    import io as _io
+    import json as _json
+    import sqlite3 as _sql
+    import tarfile as _tar
+
+    with _tar.open(src) as tar:
+        members = {m.name: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+    manifest = _json.loads(members["manifest.json"])
+    tmp = src.parent / "tampered.db"
+    tmp.write_bytes(members["cybersec.db"])
+    t = _sql.connect(tmp)
+    t.execute("INSERT INTO users (username, display_name, password_hash, role, active, "
+              "created_at, updated_at) VALUES ('backdoor','Backdoor','x','admin',1,'2026-01-01T00:00:00Z',"
+              "'2026-01-01T00:00:00Z')")
+    t.commit()
+    t.close()
+    members["cybersec.db"] = tmp.read_bytes()
+    manifest["files"]["cybersec.db"] = _hash.sha256(members["cybersec.db"]).hexdigest()
+    members["manifest.json"] = _json.dumps(manifest, indent=2).encode()
+    tmp.unlink()
+    with _tar.open(dst, "w:gz") as tar:
+        for name, blob in members.items():
+            info = _tar.TarInfo(name)
+            info.size = len(blob)
+            tar.addfile(info, _io.BytesIO(blob))
+    return dst
+
+
+def test_edited_bundle_is_refused_by_the_recorded_hash(client, seeded, conn):
+    """SEC-100: the manifest travels inside the bundle, so it can be edited together
+    with the files it describes. Live repro before the fix: a bundle whose database
+    was swapped for one containing a `backdoor` admin verified `ok: true` and
+    `POST /api/admin/backup/restore` installed it — the live user list gained the
+    account while every in-bundle check passed and the audit log's recorded sha256
+    (which no code consulted) went unmatched."""
+    from pathlib import Path
+
+    made = client.post("/api/admin/backup").json()
+    good = Path(made["path"])
+    assert good.exists()
+
+    # The untouched bundle still verifies, and against the recorded hash.
+    v = client.post("/api/admin/backup/verify", json={"path": str(good)}).json()
+    assert v["ok"] is True and v["recorded"]["found"] is True, v
+    assert v["recorded"]["matches"] is True and v["recorded"]["actual"] == made["sha256"]
+
+    # Edited in place: same name, different content -> refused.
+    pristine = good.read_bytes()
+    in_place = _edit_bundle(good, good)
+    bad = client.post("/api/admin/backup/verify", json={"path": str(in_place)}).json()
+    assert bad["ok"] is False, bad
+    assert bad["recorded"]["matched_by"] == "name" and bad["recorded"]["matches"] is False
+    assert "modified" in bad["bad"][0]
+    r = client.post("/api/admin/backup/restore", json={"path": str(in_place), "confirm": "RESTORE"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "verify_failed", r.text
+    assert "modified after it was created" in r.json()["detail"]["message"]
+    assert "backdoor" not in _usernames(conn)
+
+    # Edited and renamed: nothing recorded matches it (by name or content), so it is
+    # unknown provenance — and the restore gate refuses it without the override.
+    good.write_bytes(pristine)  # start from the untouched bundle again
+    renamed = _edit_bundle(good, good.with_name(good.stem + "-renamed.tar.gz"))
+    v2 = client.post("/api/admin/backup/verify", json={"path": str(renamed)}).json()
+    assert v2["ok"] is True and v2["recorded"]["found"] is False, v2
+    assert "explicit override" in v2["recorded"]["note"]
+    r2 = client.post("/api/admin/backup/restore", json={"path": str(renamed), "confirm": "RESTORE"})
+    assert r2.status_code == 409 and r2.json()["detail"]["code"] == "unrecorded_bundle", r2.text
+    assert "backdoor" not in _usernames(conn)
+
+    # A renamed but untouched bundle is recognised by content and may be restored.
+    renamed_ok = good.with_name("cybersec-renamed-copy.tar.gz")
+    renamed_ok.write_bytes(pristine)
+    v3 = client.post("/api/admin/backup/verify", json={"path": str(renamed_ok)}).json()
+    assert v3["ok"] is True and v3["recorded"]["matched_by"] == "content", v3
+    good.write_bytes(renamed_ok.read_bytes())  # keep the original bundle for later tests
+    renamed_ok.unlink()
+
+
+def _usernames(conn):
+    return [r["username"] for r in conn.execute("SELECT username FROM users ORDER BY id")]
+
+
+def _make_bundle(dst, db_path):
+    """A well-formed bundle the platform never recorded (e.g. built elsewhere)."""
+    import hashlib as _hash
+    import io as _io
+    import json as _json
+    import sqlite3 as _sql
+    import tarfile as _tar
+
+    # Snapshot through the SQLite backup API, not by copying the file: the live
+    # database is in WAL mode, so the main file alone misses recent commits.
+    snapshot = Path("/tmp") / f"foreign-{dst.stem}.db"
+    src = _sql.connect(db_path)
+    dst_conn = _sql.connect(snapshot)
+    with dst_conn:
+        src.backup(dst_conn)
+    src.close()
+    dst_conn.close()
+    db_bytes = snapshot.read_bytes()
+    snapshot.unlink()
+    manifest = {"created_at": "2026-01-01T00:00:00Z", "files":
+                {"cybersec.db": _hash.sha256(db_bytes).hexdigest()}}
+    with _tar.open(dst, "w:gz") as tar:
+        for name, blob in (("cybersec.db", db_bytes),
+                           ("manifest.json", _json.dumps(manifest, indent=2).encode())):
+            info = _tar.TarInfo(name)
+            info.size = len(blob)
+            tar.addfile(info, _io.BytesIO(blob))
+    return dst
+
+
+def test_bundle_without_a_creation_record_is_reported_not_refused(client, seeded):
+    """A bundle the platform has no `backup.created` row for (built elsewhere, or
+    restored onto a rebuilt database) is not evidence of tampering: it verifies, the
+    response says the hash could not be compared, and restore needs the explicit
+    override — which is what makes it a deliberate act."""
+    from pathlib import Path
+
+    from app.config import settings
+
+    client.post("/api/admin/backup")  # so the log does have recorded bundles to compare against
+    foreign = Path(settings.backups_dir) / "cybersec-foreign.tar.gz"
+    _make_bundle(foreign, settings.db_path)
+
+    v = client.post("/api/admin/backup/verify", json={"path": str(foreign)}).json()
+    assert v["ok"] is True and v["recorded"]["found"] is False, v
+    assert "explicit override" in v["recorded"]["note"]
+
+    r = client.post("/api/admin/backup/restore", json={"path": str(foreign), "confirm": "RESTORE"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "unrecorded_bundle", r.text
+
+    # The override is explicit, and the restore then proceeds.
+    r2 = client.post("/api/admin/backup/restore",
+                     json={"path": str(foreign), "confirm": "RESTORE", "allow_unrecorded": True})
+    assert r2.status_code == 200 and r2.json()["ok"] is True, r2.text
+    assert "backdoor" not in _usernames(seeded)
+
+    # Path containment still applies to the new endpoint.
+    assert client.post("/api/admin/backup/verify",
+                       json={"path": "/etc/passwd"}).status_code == 400
+
+
+def test_backup_inventory_lists_the_bundles_the_platform_writes(client, seeded):
+    """SEC-101: the retention report globbed `*.db`, but `create_backup` packs the
+    snapshot into `<name>.tar.gz` and deletes the intermediate `.db` — so the report
+    answered `total: 0` while bundles sat in the backups directory. Live before the
+    fix: one bundle on disk, `backups: {"total": 0, "items": []}`."""
+    from pathlib import Path
+
+    made = client.post("/api/admin/backup").json()
+    name = Path(made["path"]).name
+    assert list(Path(made["path"]).parent.glob("*.db")) == []  # nothing for the old glob
+
+    rep = client.get("/api/admin/retention/report").json()["backups"]
+    entry = next(i for i in rep["items"] if i["name"] == name)
+    assert rep["total"] >= 1
+    assert entry["kind"] == "bundle" and entry["size_bytes"] > 0
+    assert entry["verifies"] is True and entry["matches_recorded"] is True
+    assert entry["sha256"] == made["sha256"]
