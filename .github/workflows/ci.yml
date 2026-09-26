@@ -1,5 +1,6 @@
 # CYBER-SEC CI baseline — zero-budget: GitHub Actions free tier, open-source toolchain only.
-# Jobs: secrets (gitleaks), backend (ruff + pytest), frontend (tsc build).
+# Jobs: secrets (gitleaks), backend (ruff + pytest), live (smoke + acceptance),
+# frontend (tsc build), supply-chain (SBOM + pip-audit).
 # All must pass for a green branch.
 name: ci
 
@@ -64,6 +65,52 @@ jobs:
           path: |
             app/backend/.pytest_cache/
           if-no-files-found: ignore
+
+  live-smoke:
+    # SEC-114b/118: the assembled app, over real HTTP. The test suite exercises the
+    # FastAPI app in-process; this job boots uvicorn against a seeded database and
+    # checks the live surface (every read route answers for an admin, every route
+    # 401s unauthenticated, consequential writes 403 for a viewer) plus the twelve
+    # acceptance clauses (planning/acceptance-criteria.md).
+    name: live — smoke + acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: app/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: app/backend/requirements.txt
+      - name: Install dependencies (pinned)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Build the SPA (the app serves dist/)
+        working-directory: app/frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Seed the synthetic dataset
+        run: python -m app.seed.seed_demo
+      - name: Start the app
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8080 > /tmp/uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/api/healthz && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/api/healthz
+      - name: Smoke check (live surface + RBAC)
+        run: python -m scripts.smoke_check
+      - name: Acceptance clauses (planning/acceptance-criteria.md)
+        run: python -m scripts.acceptance_check
+      - name: App log (on failure)
+        if: failure()
+        run: tail -50 /tmp/uvicorn.log
 
   frontend:
     name: frontend — typecheck + build

@@ -1855,6 +1855,28 @@ styles; `frame-ancestors 'none'`) and `Permissions-Policy`. HSTS is sent only wh
 request arrived over TLS, because pinning a browser to `https` for a loopback preview
 host would break the local lab.
 
+#### New tool — `scripts/acceptance_check.py`
+
+`pytest` proves behaviour and `smoke_check.py` proves the live surface; neither answers
+*the release clauses*. `planning/acceptance-criteria.md` has twelve of them, and until now
+each was answered by reading a document and remembering. The new script answers each with
+a command, printing `pass` (with the values behind it), `host-ops` (with the exact command
+to run on the target host — the sandbox cannot apply nftables or deploy to a clean target)
+or `fail`, and exiting non-zero only for `fail`. It also records the tested database's
+sha256 and row counts, so a release decision names the exact dataset the report describes.
+
+Against the seeded install: **10 demonstrated · 2 host-ops · 0 failed** —
+env/version recorded (LOCAL, 1.0.0, last release v1.0.0 with the checklist hash), core
+flows (12 probes, all 200 with rows), RBAC (anonymous 401, viewer 403 on the
+consequential writes), integrations (4 rows with health/provenance, probes recorded),
+synthetic events (a second detection pass over 342 events creates 0 duplicate alerts),
+agent governance (4 agents with tool allowlists, approvals + eval endpoints), secrets
+(CI gitleaks over full history), backup + restore (bundle created and verified, doctor's
+`backup.freshness` ok), docs match implementation (18 docs, all linked), risks accepted
+(risk register present; the approved release names the decision maker and the checklist
+hash it was approved against). The two `host-ops` clauses are the isolation matrix and
+the clean-target deploy/rollback, each printed with the command that discharges it.
+
 #### New tool — `scripts/smoke_check.py`
 
 An operator/CI smoke check that walks the *live* OpenAPI surface: it fills every path

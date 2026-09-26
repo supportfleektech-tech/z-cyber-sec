@@ -43,6 +43,14 @@ Date (UTC): ____   Approver (human, name + role): ____
 - [ ] Unknown API path returns JSON, not the SPA (SEC-073):
       `curl -s -o /dev/null -w '%{http_code}' https://<domain>/api/nope` → `404`
 - [ ] Detection rules all compile (SEC-074): `python -m scripts.lint_rules` → exit 0
+- [ ] Live surface smoke check (SEC-114b): `.venv/bin/python -m scripts.smoke_check` → `SMOKE OK`
+      (every read route answers for an admin, every route 401s unauthenticated, fourteen
+      consequential writes 403 for a viewer)
+- [ ] Acceptance clauses (SEC-118): `.venv/bin/python -m scripts.acceptance_check` → 0 failed,
+      with the two `host-ops` clauses (isolation matrix, clean-target deploy/rollback)
+      ticked on the target host and the dataset hash recorded next to the approval
+- [ ] Operator self-diagnosis (SEC-116): `GET /api/admin/doctor` → `verdict` is `ok`, or every
+      `warn`/`fail` is understood and recorded in the decision comment
 - [ ] Tradecraft guardrails intact (SEC-075/076/077): `GET /api/tradecraft/scope` lists
       only targets of authorized/running exercises **with an in-force authorization
       window** (`expired_engagements` empty); an out-of-scope review is refused with

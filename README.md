@@ -102,6 +102,17 @@ every read route answers for an admin, every route answers 401 unauthenticated, 
 viewer gets 403 on every consequential write — see docs/13 (SEC-114b) and
 `GET /api/admin/doctor` for the in-app equivalent.
 
+The release clauses have their own command — one line of evidence per clause of
+`planning/acceptance-criteria.md`, with the target-host-only clauses printed as the
+exact command to run there:
+
+```bash
+cd app/backend && .venv/bin/python -m scripts.acceptance_check
+# 10 demonstrated · 2 host-ops · 0 failed   (dataset 5239d09217b2ede0)
+```
+
+CI runs both against a freshly seeded instance in the `live` job.
+
 ## Tests & CI
 
 ```bash
