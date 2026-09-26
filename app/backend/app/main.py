@@ -5,6 +5,7 @@ Run:  .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
 """
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -82,6 +83,30 @@ def create_app() -> FastAPI:
                             content={"detail": {"code": "invalid_request",
                                                 "message": summary or "Invalid request.",
                                                 "errors": items}})
+
+    @app.exception_handler(sqlite3.IntegrityError)
+    async def integrity_violation(request: Request, exc: sqlite3.IntegrityError):
+        # SEC-109: three live writes (a null into a NOT NULL column on
+        # intel/cloud-posture, an asset_id of 0 that skipped its existence check and
+        # then failed the foreign key) answered an opaque 500 for what is a bad
+        # request the API can describe. Translate the constraint into the documented
+        # {code, message} envelope; never echo the SQL or the table name.
+        raw = str(exc)
+        detail = raw.split(":", 1)[1].strip() if ":" in raw else ""
+        fields = [f.rsplit(".", 1)[-1].strip() for f in detail.split(",") if f.strip()]
+        if raw.startswith("NOT NULL"):
+            code, status, msg = "missing_field", 400, "This field must not be null."
+        elif raw.startswith("FOREIGN KEY"):
+            code, status, msg = "bad_reference", 400, "A referenced row does not exist."
+        elif raw.startswith("UNIQUE"):
+            code, status, msg = "duplicate", 409, "A row with this value already exists."
+        elif raw.startswith("CHECK"):
+            code, status, msg = "constraint_violation", 400, "The value fails a data constraint."
+        else:
+            code, status, msg = "constraint_violation", 400, "The request violates a data constraint."
+        return JSONResponse(status_code=status,
+                            content={"detail": {"code": code, "message": msg,
+                                                "fields": fields}})
 
     @app.exception_handler(OverflowError)
     async def out_of_range(request: Request, exc: OverflowError):

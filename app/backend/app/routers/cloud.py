@@ -151,6 +151,11 @@ def update_posture(finding_id: int, body: PostureUpdateIn, conn: sqlite3.Connect
     if "asset_id" in provided and not db.one(conn, "SELECT id FROM cloud_assets WHERE id = ?",
                                               (body.asset_id,)):
         raise HTTPException(400, {"code": "bad_asset", "message": "asset_id does not exist"})
+    # SEC-109: `title` is NOT NULL. The model allows null (it cannot tell "not sent"
+    # from "sent as null"), so an explicit null reached the UPDATE and the constraint
+    # came back as an opaque 500. Refuse it, naming the field.
+    if "title" in provided and body.title is None:
+        raise HTTPException(400, {"code": "missing_field", "message": "title must not be null."})
     columns = {"asset_id": body.asset_id, "rule_id": body.rule_id, "title": body.title,
                "severity": body.severity, "status": body.status, "detail": body.detail,
                "meta": db.jdump(body.meta)}

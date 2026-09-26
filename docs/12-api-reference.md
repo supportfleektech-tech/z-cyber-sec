@@ -29,6 +29,12 @@ verification evidence.
   clamped rather than refused (`page` ≤ 10,000,000, `page_size` ≤ 1,000): a huge
   `page` is served as the last page — empty `items`, the real `total`, and the
   `page` actually served (SEC-108).
+- **Constraints:** a body that would violate a database constraint is a client
+  error with a stable code, never a 500 — `400 missing_field` for an explicit
+  `null` where the column is `NOT NULL`, `400 bad_reference` for a missing
+  referenced row (e.g. `asset_id: 0`, which the routes also refuse up front as
+  `bad_asset`), `409 duplicate` for a unique value, `400 constraint_violation`
+  otherwise, with the column names under `detail.fields[]` (SEC-109).
 - **Numbers:** query params are Python ints but SQLite's are 64-bit, so a value
   outside `|n| <= 9223372036854775807` in an id filter (e.g.
   `?asset_id=999…`) is `422 value_out_of_range` naming the bound — never a 500
@@ -501,6 +507,10 @@ implemented.
 | `bad_severity` | severity values outside the standard five (SEC-079) |
 | `invalid_request` | request validation (422), with `errors[]` |
 | `value_out_of_range` | numeric query param outside the 64-bit range (422, SEC-108) |
+| `missing_field` | an explicit `null` for a field the column requires (400, SEC-109) |
+| `bad_reference` | a referenced row does not exist (400, constraint net, SEC-109) |
+| `duplicate` | a unique value already exists (409, constraint net, SEC-109) |
+| `constraint_violation` | another data constraint (CHECK/…) refused the write (400, SEC-109) |
 | `no_changes` | PATCH with empty diff |
 | `missing` | report file gone |
 | `confirm_required` | restore without `confirm:"RESTORE"` |

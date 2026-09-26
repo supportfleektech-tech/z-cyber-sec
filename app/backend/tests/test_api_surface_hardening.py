@@ -16,6 +16,8 @@ Three findings, all fixed and pinned by tests here:
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import ratelimit
@@ -322,3 +324,65 @@ def test_oversized_numbers_are_client_errors_not_500s(client, seeded):
 
     # A valid id still works.
     assert client.get("/api/soc/alerts?page=1&page_size=5").status_code == 200
+
+
+def test_null_into_a_not_null_column_is_a_client_error(client, seeded):
+    """SEC-109: `title`/`value`/`type` are NOT NULL columns, but their models allow
+    null (a pydantic model cannot tell "not sent" from "sent as null"), so an explicit
+    null reached the UPDATE. Live pre-fix: `PATCH /api/intel/indicators/1
+    {"value": null}` and `PATCH /api/cloud/posture/1 {"title": null}` both answered
+    500 `internal_error` over `sqlite3.IntegrityError: NOT NULL constraint failed`."""
+    ind = client.get("/api/intel/indicators").json()["items"][0]
+    r = client.patch(f"/api/intel/indicators/{ind['id']}", json={"value": None})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "missing_field"
+    assert "value" in r.json()["detail"]["message"]
+    # `type` is caught by the enum check first (None is not one of IND_TYPES), which is
+    # just as clean: a 400 naming the field, not a 500.
+    r = client.patch(f"/api/intel/indicators/{ind['id']}", json={"type": None})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_type"
+
+    p = client.get("/api/cloud/posture").json()["items"][0]
+    r = client.patch(f"/api/cloud/posture/{p['id']}", json={"title": None})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "missing_field"
+
+    # ...and the rows were not touched by the refused writes.
+    assert client.get("/api/intel/indicators").json()["items"][0]["value"] == ind["value"]
+    assert client.get("/api/cloud/posture").json()["items"][0]["title"] == p["title"]
+
+
+def test_falsy_foreign_key_is_checked_not_skipped(client, seeded):
+    """SEC-109: `_insert_finding` validated the asset with `if asset and …`, so an
+    `asset_id` of 0 skipped the existence check and reached the INSERT, where the
+    foreign key failed as an opaque 500 (live-reproduced with `asset_id: "0"`).
+    Only *absent* means "no asset"."""
+    r = client.post("/api/vulns", json={"asset_id": 0, "title": "falsy asset id"})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"]["code"] == "bad_asset"
+    # A real asset id still works, and no asset still works.
+    assert client.post("/api/vulns", json={"asset_id": 1, "title": "real asset id"}).status_code == 201
+    assert client.post("/api/vulns", json={"title": "no asset id"}).status_code == 201
+
+
+def test_integrity_errors_map_to_documented_codes():
+    """SEC-109: the net behind the specific fixes — any write that still reaches the
+    database with a bad constraint answers the documented envelope instead of a 500."""
+    import asyncio
+    import sqlite3
+
+    from app.main import app as fastapi_app
+
+    handler = fastapi_app.exception_handlers[sqlite3.IntegrityError]
+    cases = {
+        "NOT NULL constraint failed: threat_indicators.value": ("missing_field", 400, ["value"]),
+        "FOREIGN KEY constraint failed": ("bad_reference", 400, []),
+        "UNIQUE constraint failed: users.username": ("duplicate", 409, ["username"]),
+        "CHECK constraint failed: status": ("constraint_violation", 400, ["status"]),
+    }
+    for message, (code, status, fields) in cases.items():
+        resp = asyncio.run(handler(None, sqlite3.IntegrityError(message)))
+        assert resp.status_code == status, message
+        detail = json.loads(resp.body)["detail"]
+        assert detail["code"] == code and detail["fields"] == fields, message
+        assert "constraint failed" not in detail["message"]  # no SQL echoed

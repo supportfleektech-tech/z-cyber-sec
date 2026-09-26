@@ -855,13 +855,15 @@ timestamps) 285 → 287 (2 new: the labelled alert series counts only open alert
 and expired sessions are not active) 287 → 289 (2 new: a scan run's counters
 describe the run, and an import does not rewrite a reported status) and 289 → 291
 (2 new: a scope change is audited with before/after, and an unreadable window is
-refused and inert) and 291 → 292 (1 new: an oversized number is a client error, not
-a 500), ruff clean.
+refused and inert), 291 → 292 (1 new: an oversized number is a client error, not
+a 500) and 292 → 295 (3 new: a null into a NOT NULL column is refused, a falsy id no
+longer skips its existence check, and the constraint net answers documented codes),
+ruff clean.
 
-**Current totals:** **292 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **295 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-108 series was reproduced first (as a failing check or a live request) and
+SEC-109 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1588,3 +1590,43 @@ a LIMIT/OFFSET, and filters that reach SQLite as a bound parameter.
 `?page=999…` → `200 {items: [], total: 6, page: 10000000}` on alerts, assets, audit
 and GRC controls; `?agent_id=`/`?asset_id=`/`?scan_run_id=`/`?playbook_id=` oversized
 → `422 value_out_of_range` naming the range.
+
+### SEC-109 — a write that violated a database constraint answered an opaque 500 (fixed)
+
+Found by extending the fuzzing to request bodies: for every POST/PATCH/PUT route the
+schema-driven fuzzer synthesized a body from `/api/openapi.json`, repaired it against
+the `422` field errors until the API accepted it, then replaced every writable field
+with boundary values (`null`, `""`, `abc`, `0`, `-1`, `9…`, `["x"]`, `{"a":1}`,
+`"2026-13-45"`, SQL/HTML payloads). Three live 500s:
+
+```
+PATCH /api/intel/indicators/1 {"value": null}   500  NOT NULL constraint failed: threat_indicators.value
+PATCH /api/cloud/posture/1   {"title": null}    500  NOT NULL constraint failed: posture_findings.title
+POST  /api/vulns             {"asset_id": "0"}  500  FOREIGN KEY constraint failed
+```
+
+**Was:** two shapes of the same defect. (1) `title`/`value`/`type` are NOT NULL
+columns but their models allow `null` — a pydantic model cannot tell "not sent" from
+"sent as null", and the routes write any non-None… except null, which passed the
+`provided` check and reached the `UPDATE`. (2) `_insert_finding` validated the asset
+with `if asset and not db.one(…)`: a **falsy** id (0) skipped the existence check and
+went into the INSERT, where the foreign key failed. The same falsy trap sat on
+`source_id` in two intel paths.
+
+**Fixed:**
+- The specific holes: an explicit null for a NOT NULL field is refused with
+  `400 missing_field` naming it (`title` on cloud posture, `type`/`value` on
+  indicators — `type` is caught by the enum check first, which is equally clean); the
+  falsy-id traps now read `is not None`, so `asset_id: 0` and `source_id: 0` are
+  `400 bad_asset`/`bad_source` instead of a foreign-key 500.
+- A net behind them: `sqlite3.IntegrityError` is translated — `NOT NULL` →
+  `400 missing_field`, `FOREIGN KEY` → `400 bad_reference`, `UNIQUE` → `409 duplicate`,
+  `CHECK` → `400 constraint_violation` — with the offending column names under
+  `fields[]` (table prefixes stripped) and no SQL echoed. Any write path that still
+  reaches the database with a bad constraint answers the documented envelope.
+
+**Live (after fix):** `value: null` → `400 missing_field "value must not be null."`;
+`type: null` → `400 bad_type` (the enum check fires first); `title: null` →
+`400 missing_field`; `asset_id: 0`, `asset_id: "0"` and `asset_id: 9999` →
+`400 bad_asset`; `source_id: 0` → `400 bad_source`; the indicator row is unchanged
+after the refused writes.

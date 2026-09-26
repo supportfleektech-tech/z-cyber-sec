@@ -60,7 +60,10 @@ class FindingIn(BaseModel):
 
 def _insert_finding(conn, f: dict) -> tuple[int, bool]:
     asset = f.get("asset_id")
-    if asset and not db.one(conn, "SELECT id FROM assets WHERE id = ?", (asset,)):
+    # SEC-109: `if asset and …` treated a falsy id (0) as "no asset", skipped the
+    # existence check and let 0 through to the INSERT, where the foreign key failed as
+    # an opaque 500. Only *absent* means "no asset".
+    if asset is not None and not db.one(conn, "SELECT id FROM assets WHERE id = ?", (asset,)):
         raise HTTPException(400, {"code": "bad_asset"})
     sev = f.get("severity") or severity_from_cvss(f.get("cvss"))
     # SEC-082: severity is a finding's triage input, not free text — an imported

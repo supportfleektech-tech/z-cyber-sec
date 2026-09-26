@@ -177,7 +177,11 @@ def create_indicator(body: IndicatorIn, conn: sqlite3.Connection = Depends(db.ge
                      user: dict = Depends(require("intel.write"))):
     if body.type not in IND_TYPES:
         raise HTTPException(400, {"code": "bad_type", "message": f"type must be one of {sorted(IND_TYPES)}"})
-    if body.source_id and not db.one(conn, "SELECT id FROM intel_sources WHERE id = ?", (body.source_id,)):
+    # SEC-109: `if body.source_id and …` skipped the check for a falsy id (0 is not a
+    # source), which then reached the INSERT and failed the foreign key as an opaque
+    # 500. Only *absent* means "no source".
+    if body.source_id is not None and not db.one(conn, "SELECT id FROM intel_sources WHERE id = ?",
+                                                 (body.source_id,)):
         raise HTTPException(400, {"code": "bad_source"})
     # SEC-087: `status` was silently ignored on create (POST with
     # status:"revoked" returned 201 and stored an *active* indicator, which
@@ -266,7 +270,11 @@ class StixImportIn(BaseModel):
 def import_stix(body: StixImportIn, conn: sqlite3.Connection = Depends(db.get_conn),
                 user: dict = Depends(require("intel.write"))):
     """Import a STIX 2.1 bundle (subset parser, ADR-004)."""
-    if body.source_id and not db.one(conn, "SELECT id FROM intel_sources WHERE id = ?", (body.source_id,)):
+    # SEC-109: `if body.source_id and …` skipped the check for a falsy id (0 is not a
+    # source), which then reached the INSERT and failed the foreign key as an opaque
+    # 500. Only *absent* means "no source".
+    if body.source_id is not None and not db.one(conn, "SELECT id FROM intel_sources WHERE id = ?",
+                                                 (body.source_id,)):
         raise HTTPException(400, {"code": "bad_source"})
     try:
         parsed = parse_bundle(body.bundle)
@@ -341,10 +349,17 @@ def update_indicator(ind_id: int, body: IndicatorUpdateIn, conn: sqlite3.Connect
                                   "message": "Send at least one field to update."})
     if "type" in provided and body.type not in IND_TYPES:
         raise HTTPException(400, {"code": "bad_type", "message": f"type must be one of {sorted(IND_TYPES)}"})
+    # SEC-109: `type`/`value` are NOT NULL columns. The model allows null (it cannot
+    # tell "not sent" from "sent as null"), so an explicit null reached the UPDATE and
+    # the constraint became an opaque 500. Refuse it, naming the field.
+    for field in ("type", "value"):
+        if field in provided and getattr(body, field) is None:
+            raise HTTPException(400, {"code": "missing_field",
+                                      "message": f"{field} must not be null."})
     if "status" in provided and body.status not in IND_STATUSES:
         raise HTTPException(400, {"code": "bad_status",
                                   "message": f"status must be one of {sorted(IND_STATUSES)}"})
-    if "source_id" in provided and body.source_id and \
+    if "source_id" in provided and body.source_id is not None and \
             not db.one(conn, "SELECT id FROM intel_sources WHERE id = ?", (body.source_id,)):
         raise HTTPException(400, {"code": "bad_source"})
     new_type = body.type if "type" in provided else i["type"]
