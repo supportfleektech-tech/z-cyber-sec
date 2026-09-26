@@ -1,0 +1,63 @@
+# CYBER-SEC STAGING stack (SEC-060, ADR-007).
+#
+# Staging is a SEPARATE environment: different host (or at minimum a
+# different network + volume namespace) from production, running the SAME
+# image as prod. It is where the release checklist's acceptance section is
+# executed before human approval (docs/14).
+#
+#   docker build -f app/backend/Dockerfile -t cybersec:local .   # same artifact as prod
+#   cd infra/staging && cp .env.example .env && edit .env
+#   docker compose up -d
+#
+# Properties (enforced, not aspirational):
+#   - ENV_NAME=STAGING  → X-Environment: STAGING + X-Data-Class: synthetic-by-default
+#                         on every response; boot guard refuses the dev SECRET_KEY
+#   - HTTP-only, bound to the internal/staging interface — no public DNS,
+#     no TLS termination here (that is prod's Caddy). If a browser must be
+#     used, access via the internal address.
+#   - Its own named volume (cybersec-staging-data) — never mounted from
+#     prod, never shared; staging data is disposable synthetic.
+#   - Same resource caps + log caps as prod so staging findings transfer.
+
+services:
+  cybersec:
+    image: cybersec:local
+    build:
+      # context = repo root (Dockerfile COPYs app/backend + app/frontend paths)
+      context: ../..
+      dockerfile: app/backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENV_NAME: STAGING
+      DATA_DIR: /var/lib/cybersec
+      TOKEN_TTL_HOURS: ${TOKEN_TTL_HOURS:-4}
+    volumes:
+      - cybersec-staging-data:/var/lib/cybersec
+    ports:
+      # Bind to the staging LAN address only (set in .env). 127.0.0.1 =
+      # host-local access via a tunnel/ssh -L only.
+      - "${STAGING_BIND_ADDR:-127.0.0.1}:${STAGING_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/healthz', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [cybersec-staging]
+
+volumes:
+  cybersec-staging-data:
+
+networks:
+  cybersec-staging:
+    driver: bridge

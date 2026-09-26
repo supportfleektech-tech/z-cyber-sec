@@ -1,0 +1,13 @@
+uid: cs-0006
+name: Privilege Escalation Attempt
+description: >
+  Sudo misuse or explicit privilege escalation events. MITRE T1548.
+severity: high
+status: active
+detection:
+  sudo:
+    action: sudo
+    outcome: failure
+  explicit:
+    action: priv_escalation
+condition: sudo or explicit

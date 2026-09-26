@@ -1,0 +1,10 @@
+# CYBER-SEC backend — zero-budget, all free / open-source, pinned.
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+PyYAML==6.0.3
+Jinja2==3.1.6
+httpx==0.28.1
+pytest==9.1.1
+ruff==0.16.8
+python-multipart==0.0.32

@@ -1,0 +1,1909 @@
+# 13 — Verification & Evidence Log
+
+Discipline: every claim carries command, environment, timestamp, result,
+and limitation. Labels: **Verified** (observed this turn), **Previously
+reported** (observed in an earlier turn, re-check before relying),
+**Proposed** (not yet done).
+
+## Environment
+
+- Host: Arena.ai sandbox (Linux), repo `supportfleektech-tech/z-cyber-sec`,
+  branch `arena/01a0c152-z-cyber-sec` (branched from `main` @
+  `72633702551d6857b02bb1a680054b766fa07b5c`).
+- Python 3.11 (`app/backend/.venv`, deps from pinned
+  `requirements.txt`); Node 20 + npm (frontend, `package-lock.json`
+  committed); SQLite (stdlib); all timestamps UTC.
+- Date: 2026-09-21. Environment labeled `LOCAL`; all data synthetic
+  (`data_class='synthetic'`, seeded by `app/backend/app/seed/seed_demo.py`).
+
+## Backend test suite — Verified
+
+```
+$ cd app/backend && .venv/bin/python -m pytest
+97 passed, 4 warnings in 67.05s (0:01:07)     # 2026-09-21 ~05:22 UTC (post capacity test added)
+96 passed, 4 warnings in 83.52s (0:01:23)     # 2026-09-21 ~04:19 UTC (post ruff E741 fix)
+96 passed, 4 warnings in 83.80s (0:01:23)     # 2026-09-21 ~04:15 UTC (pre-ruff-fix run)
+```
+Also **Previously reported**: 4 consecutive green runs of 96/96 before the
+`intel.py` status-patch change; the runs above are the post-change
+confirmation. Coverage notes: auth (oracle-free login, session revocation),
+RBAC permission matrices per domain, detection engine (threshold/timeframe/
+entity, dry-run, backfill), STIX subset parser, audit chain verify,
+evidence permission split, agents (allowlist deny, approval gate, evals),
+automation (dry-run executes nothing), reports (provenance fields),
+backup/restore round-trip.
+
+## Lint — Verified
+
+```
+$ .venv/bin/ruff check app/          # 2026-09-21 ~04:16 UTC (after fix)
+All checks passed!
+```
+(Fix applied same day: `app/routers/grc.py` E741 — renamed `l`/`i` to
+`lik`/`imp` in the risk-score recompute block.)
+
+## Frontend build — Verified
+
+```
+$ cd app/frontend && npm run build    # 2026-09-21, earlier cycle
+✓ built in ~1.5s
+dist/assets/index-BYlOEAjU.css   7.95 kB
+dist/assets/index-C6Fo0R9B.js 259.33 kB  (73.59 kB gzip)
+```
+`dist/` is served by the backend (single origin). SPA assets live-checked
+this cycle: `GET /assets/index-C6Fo0R9B.js` → 200,
+`GET /assets/index-BYlOEAjU.css` → 200 (2026-09-21 ~04:14 UTC).
+
+## Live server — Verified
+
+```
+$ .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8080
+$ curl -s localhost:8080/api/healthz
+{"ok":true,"env":"LOCAL","version":"1.0.0"}
+$ curl -s -X POST localhost:8080/api/auth/login -d '{"username":"admin","password":"***"}'
+HTTP 200 (cookie session)
+$ curl -s localhost:8080/            # SPA index.html served
+$ curl -s -b <jar> localhost:8080/api/overview/stats
+{"events_total":342,"alerts":{"total":6,"critical":1,"high":4,"medium":1},
+ "cases":{"total":1,"investigating":1},"vulns":{"total":8,"open":6}, ...}
+```
+
+## Module smoke (new pages' endpoints) — Verified, 2026-09-21 (this session)
+
+- `GET /api/agents/approvals?status=pending` → `{"items":[],"total":0}`
+- `POST /api/automation/1/run` `{"dry_run":true,"note":"smoke"}` →
+  `{"run_id":7,"dry_run":true,"plan":{"status":"pending","reasons":[],
+  "steps":[{"tool":"summarize_alerts","args":{}},
+           {"tool":"get_alerts","args":{"status":"new"}}]}}` — dry run
+  returned a plan and executed nothing.
+- `POST /api/reports` `{"kind":"overview"}` →
+  `{"id":1,"path":".../data/reports/overview-1.html","input_rows":349,
+   "input_sha256":"47830bfa4a5cfbb00e0f2a543c051ba123d693e97dbed3d627cdfc1d5a02d8cd"}`
+
+## Capacity / load test (SEC-043) — Verified, 2026-09-21 ~05:20 UTC
+
+`app/backend/scripts/load_test.py` drives the real ASGI app (API + detection
+engine + SQLite) with a synthetic stream (~85% benign + concentrated SSH
+brute-force / login-storm patterns so detection work is representative).
+Runs use a throwaway data dir and a runtime-generated load-test user (no
+credential literals in source, ADR-006).
+
+```
+$ .venv/bin/python -m scripts.load_test --events 20000 --batch 250   # → GATE: PASS
+events_per_second: 3903.2    batch p50 64ms / p95 97ms / p99 134ms / max 134ms
+detections_fired: 251 (→ 8 alerts after per-rule/entity dedupe)
+db_size_bytes: 360448 → 6082560   (~275 B/event incl. WAL)
+
+$ .venv/bin/python -m scripts.load_test --events 50000 --batch 500   # → GATE: PASS
+events_per_second: 6722.4    batch p50 72ms / p95 107ms / max 112ms
+db_size_bytes: 360448 → 14548992
+```
+
+- Bounded regression guard in the fast suite: `tests/test_capacity.py`
+  (2,000 events / 8 batches, <20s floor, detection must fire) — 1.05s
+  locally, part of the suite.
+- **Live-uvicorn HTTP mode — Verified 2026-09-21 ~08:35 UTC** (was the last
+  pending part of SEC-043): `--mode http` against a real `uvicorn` instance
+  on 127.0.0.1:8081 with a throwaway seeded DATA_DIR (preview DB untouched):
+  20,000 events → **4,501.2 ev/s** (wall 4.44s), batch p50/p95/p99/max
+  57/90/101/101 ms, 251 detections → 8 alerts, GATE PASS. The network path
+  matches/exceeds the in-process ceiling; `scripts/load_test.py` httpx call
+  fixed for 0.28 keyword-only API.
+- Multi-client concurrency: not exercised (single-client sequential batches
+  already saturate the measured ceiling; revisit only if a concurrency
+  requirement appears — ADR-008 trigger list).
+
+## CI on GitHub Actions — Verified (2026-09-21 ~04:22 UTC)
+
+First run of `.github/workflows/ci.yml` (PR #1, run 35560868111):
+
+- `backend — ruff + pytest`: **pass** (1m19s)
+- `frontend — typecheck + build`: **pass** (25s)
+
+Push and pull_request triggers both fired; both green.
+
+## SEC-050/056/071/072 extension block — Verified, 2026-09-21 ~06:00 UTC
+
+Environment: same sandbox, backend venv (py3.11), branch
+`arena/01a0c152-z-cyber-sec` (uncommitted at time of writing).
+
+| Item | Command | Result |
+|---|---|---|
+| Lint | `ruff check app/ scripts/` | All checks passed |
+| Full test suite | `pytest -q` | 110 passed (97 prior + 13 new in `tests/test_extensions.py`), exit 0, ~74s |
+| New tests | `pytest tests/test_extensions.py` | 13 passed — purple-team pass + rerun dedupe (created→updated) + 404 + audit rows in `audit_events`; coverage `never_fired` flips; saved-search owner scoping (403 cross-owner delete, 400 bad module); schedule lifecycle (create → force-due via `next_run_at` UPDATE → run-due builds 1 report → `last_run_at`/`next_run_at` advance → pause → 400 bogus status → delete); retention report (`due_count`, `legal_hold`, evidence with retention `1d` from 2000); adapters (builtin+prompt→400 "no brain", bad adapter→400, `openai_compat` via monkeypatched `httpx.post` asserting URL + allowlisted tools only, completed+truthful, **bypass attempt denied** — model proposes `create_case` while allowlist has only `summarize_alerts` → status `denied`, "allowlist" in reason, `cli` roundtrip via real subprocess, malformed output→400) |
+| Migration | boot with `0002_extensions.sql` | auto-applied (tests run against it; scheduler tables + adapter columns present) |
+| Frontend build | `npm run build` | `tsc -b && vite build` ✓ 50 modules, `dist/assets/index-Cuz-NSpu.js` 270.09 kB (gzip 75.94 kB) |
+| Backup rehearsal | `python -m scripts.backup_rehearsal` (in-process) | **DRILL: PASS** — backup created, sha256 verified, live DB wiped, production `restore_from` applied, **342/342 events** match baseline, audit chain ok both sides, RTO 0.01s (in-process; live-mode path documented, unrun in sandbox) |
+| Live server smoke (post-restart, migration 0002 auto-applied) | `uvicorn app.main:app` on :8080, cookie-authed curl/python probes | healthz 200; coverage 200 (100%, 0 gaps); PT scenarios listed; **pt-001/002/003 × 3 rounds all HTTP 200, passed=true**; schedule create 201 (`active`); retention report 200 (nested `evidence{}` shape); saved-searches owner-scoped (sasha sees 0 of admin's); SPA serves rebuilt bundle `index-Cuz-NSpu.js` |
+| Bug found by smoke → fixed | pt-003 returned 500: `sqlite3.ProgrammingError … created in a thread can only be used in that same thread` in `db.get_conn` teardown. Root cause: FastAPI runs sync dependency setup/teardown via anyio's LIFO worker pool; a background scheduler tick between a request's work and its teardown moves the teardown to a different worker. Fix: `sqlite3.connect(..., check_same_thread=False)` in `app/db.py` (per-request usage is sequential; WAL + busy_timeout serialize writers). Re-verified: full suite 110 passed + PT ×3×3 all 200. |
+| Docker image build | `docker build -f app/backend/Dockerfile` | **Proposed/unrun** — no docker daemon in this sandbox. COPY paths verified to exist; compose context = repo root (fixed from `infra/`); YAML valid. |
+| CI | pending this block's push | — |
+
+New/changed files: `app/backend/app/migrations/0002_extensions.sql`,
+`app/services/{purple_team,agent_adapters,scheduler,backup,report_builder}.py`,
+`app/routers/{soc,agents,reports,admin}.py`, `app/config.py`, `app/main.py`,
+`app/backend/scenarios/pt-00{1,2,3}-*.yaml`,
+`app/backend/scripts/{backup_rehearsal,load_test}.py`,
+`app/backend/tests/test_extensions.py`, `app/backend/Dockerfile`,
+`infra/prod/{docker-compose.yml,Caddyfile,.env.example.prod}`,
+`infra/network/{nftables.conf,validate_flows.sh}`,
+`.github/workflows/ci.yml` (+supply-chain job, npm audit step),
+`app/frontend/src/{api.ts,pages/{Soc,Reports,Agents}.tsx}`,
+`docs/{12-api-reference,13-verification-evidence}.md`, `gitleaks.toml`.
+
+## SEC-060/061/064/070 completion block — Verified, 2026-09-21 ~07:30 UTC
+
+Environment: same sandbox, backend venv (py3.11), branch
+`arena/01a0c152-z-cyber-sec`.
+
+| Item | Command | Result |
+|---|---|---|
+| Lint | `ruff check app/ scripts/ tests/` | All checks passed |
+| Full test suite | `pytest -q` | **115 passed** (110 prior + 2 forwarded-headers + 2 release-gate + 1 boot-guard), exit 0, ~88s |
+| SEC-061 boot guard hardened (self-caught footgun) | new test `test_boot_guard_rejects_placeholder_secrets` | The guard only rejected the dev default — an operator copying `.env.example` unedited would boot on `__SET__`. Now STAGING/PROD also reject template placeholders + keys <32 chars (ADR-006 updated; LOCAL stays permissive) |
+| Backup rehearsal | `python -m scripts.backup_rehearsal` (in-process) | **DRILL: PASS** — 342/342 events, sha256 ok, chain ok both sides, RTO 0.01s |
+| Frontend build | `npm run build` | `tsc -b && vite build` ✓ 50 modules, `dist/assets/index-yPnJV00W.js` 274.36 kB (gzip 76.89 kB) |
+| SEC-061 edge trust (real bug found & fixed) | new `app/middleware.py` `ForwardedHeadersMiddleware` + 2 tests | The installed starlette build (1.6.0) ships **no** `ProxyHeadersMiddleware` — a naive `request.url.scheme` would never be `https` behind Caddy (no Secure cookie, client IP = proxy). Middleware implements one-hop trust (X-Forwarded-Proto → scheme; last XFF entry / X-Real-IP → client). Tests: cookie gains `Secure` behind edge + session records `198.51.100.7` (forged leading XFF entries ignored); direct connection keeps local behavior (no Secure, `testclient` IP) |
+| SEC-064 release gate (live smoke) | cookie-authed probes on :8080 after restart (migration 0003 auto-applied) | gate `no_decision` → record `rejected` (201) → gate `blocked` → record `approved` (201) → gate `approved` (v1.1.0); history `['approved','rejected']`; sasha (soc_analyst) record → **403**; bad commit sha → 422; audit rows `release.approved`/`release.rejected` present; chain verify ok (35 rows) |
+| SEC-061 Secure cookie (live smoke) | login with `X-Forwarded-Proto: https` | Set-Cookie contains `secure` ✓ |
+| SPA | `GET /` | serves rebuilt bundle `index-yPnJV00W.js` |
+| Compose/YAML | python yaml parse + `bash -n` | `infra/staging/docker-compose.yml`, `infra/prod/docker-compose.yml`, `infra/compose/compose.yaml` valid; `validate_flows.sh` syntax OK |
+| Docker image build | `docker build` | **Proposed/unrun** — no docker daemon in sandbox (COPY paths verified to exist) |
+| CI | pending this block's push | — |
+
+New/changed files: `app/backend/app/middleware.py` (NEW),
+`app/backend/app/migrations/0003_releases.sql` (NEW),
+`app/backend/app/{main,security,config}.py` (middleware registration; `release.read`/`release.write` perms; boot-guard hardening),
+`app/backend/app/routers/admin.py` (releases endpoints),
+`app/backend/tests/{test_security,test_extensions}.py` (+4 tests; +2 ruff auto-fixes in test_capacity.py),
+`app/frontend/src/pages/Admin.tsx` (Releases tab),
+`infra/staging/{docker-compose.yml,.env.example}` (NEW, SEC-060),
+`docs/14-release-checklist.md` (NEW), `docs/adr/008-capacity-based-extraction.md` (NEW, SEC-070 decision),
+`docs/{09-production,12-api-reference,13-verification-evidence}.md`,
+`infra/README.md`, `planning/backlog.md` (44/44), `README.md` (docs index).
+
+## SEC-063 live-mode drill — Verified, 2026-09-21 ~08:10 UTC
+
+Live mode of `scripts/backup_rehearsal.py` executed against the real
+preview server (real uvicorn stop/start):
+
+- `--url http://127.0.0.1:8080 --restart-cmd ".venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080"`
+- **DRILL: PASS** — backup `cybersec-20260921T08092.tar.gz` (sha256
+  verified), server SIGTERMed, live DB files moved to `data.lost-1789978185`
+  (preserved), production `restore_from` applied, server restarted
+  (`start_new_session` so it outlives the drill), **423/423 events** match,
+  audit chain ok both sides, **RTO 16.68s** (real stop+restore+start).
+- Post-drill live check: 423 events, both release decisions present, gate
+  `approved`, chain verify ok (41 rows).
+
+Bugs found & fixed by the live run: `httpx.Client(base_url=…)` (0.28.x
+keyword-only API), and `pgrep -f uvicorn` matching the drill's own argv
+(self-kill) → replaced with a /proc cmdline scan that excludes the drill
+process + its ancestor chain.
+
+## SEC-073 API surface hardening — Verified, 2026-09-22
+
+Post-build audit of the running app (not the test suite): every `/api` route
+was inspected for an auth dependency, and the live server was probed
+unauthenticated. Four findings, all fixed, each pinned by a test in
+`tests/test_api_surface_hardening.py` (14 tests).
+
+| # | Finding (as found) | Fix |
+|---|---|---|
+| 1 | Unknown `/api/*` returned the SPA shell: **`200 text/html`** for a typo'd path, contradicting the docs/12 error contract | explicit `/api` + `/api/{rest}` catch-alls → `404 {detail:{code:"not_found"}}`, registered after real routers so nothing is shadowed |
+| 2 | `/metrics` (open-alert counts by severity, DB size, session counts) had no auth option and, in prod, would be proxied by Caddy on the **public** edge | Caddyfile `respond @metrics 403` + optional `METRICS_TOKEN` bearer gate (constant-time compare) |
+| 3 | Login brute-force limiting existed **only** as a Caddy `rate_limit` directive — not part of the standard build, so the pinned `caddy:2` image rejects such a file ("unknown directive: rate_limit"). The control existed nowhere. | limiter enforced in the app (`app/ratelimit.py`): 50/10s per IP, on by default in STAGING/PROD, `429` + `Retry-After`, one `auth.rate_limited` audit event per window, bounded key map. Caddyfile rewritten with stock directives only; the optional custom-image layer is documented in `infra/README.md`. |
+| 4 | `infra/README.md` + prod compose instruct `cp .env.example.prod .env`, but the template **did not exist** — and `.gitignore` (`.env.*`) would have silently ignored it if created | added `infra/prod/.env.example.prod`; `.gitignore` negates `!.env.example.*` (verified: template committable, real `.env` / `.env.prod` still ignored) |
+
+Route audit method: walk `app.routes` → `_IncludedRouter.original_router.routes`
+(the pinned FastAPI wraps included routers, so top-level iteration alone sees
+only 21 entries and **zero** `/api/*` — the earlier attempt that reported
+"missing endpoints" was measuring the wrapper, not the app).
+
+Results: **111 `/api` routes audited — 0 without authentication**; the only
+session-auth-without-permission route is `GET /api/auth/me` (correct: any
+authenticated user reads their own identity). The live 200s that triggered
+the audit (`/api/overview`, `/api/admin/users`) were the SPA fallback, not
+data — now they are JSON 404s.
+
+Full suite after the change: **129 passed** (115 + 14 new), `ruff` clean. Live
+checks on a throwaway STAGING instance (`ENV_NAME=STAGING`,
+`LOGIN_RATE_LIMIT=3/60s`, `METRICS_TOKEN` set, seeded temp `DATA_DIR`):
+`/metrics` 401 / 401 (wrong token) / 200 (correct token); logins 401, 401,
+401, then **429** with `Retry-After: 60` and `{"detail":{"code":"rate_limited"}}`;
+exactly one `auth.rate_limited` audit row (`seq 7`, target `ip:127.0.0.1`,
+detail `{limit:3, retry_after_s:60, window_s:60}`) beside the 3 `auth.failed`
+rows. The LOCAL preview is unchanged by design: `/metrics` open, five bad
+logins → five `401`s (no limiter locally).
+
+**Evidence level for finding 3's edge claim** (per the repo's labeling rule):
+*Verified by external sources* — the `rate_limit` directive is supplied by the
+community `mholt/caddy-ratelimit` module, not the standard build, and a stock
+`caddy:2` container rejects a Caddyfile using it. *Not load-tested here*
+(**Blocked**): `caddy validate` needs the binary, and this sandbox has no
+Docker daemon and blocks `release-assets.githubusercontent.com` (two download
+attempts, `curl` and `gh release download`, both failed). The rewritten
+Caddyfile therefore uses only stock directives (`encode`, `header`, `respond`,
+`reverse_proxy`, `@matcher`) — correct by inspection, to be confirmed by
+`caddy validate` on the target host before go-live.
+
+## SEC-074 inert-rule blind spot — Verified, 2026-09-22
+
+Closes the gap this file itself recorded ("the engine is a documented subset;
+no linter for out-of-subset rules yet").
+
+**Defect as found:** `app/routers/soc.py` skipped a non-compiling rule with a
+bare `except RuleError: continue` — no log, no audit, no counter — while
+`GET /rules` still listed it as `active` and `/rules/coverage` showed it as a
+"gap" (indistinguishable from "no matching traffic yet"). `_seed_rules` also
+inserted `rules/*.yaml` into the database **without compiling them**. Net
+effect: a rule ported from a full Sigma pack, or invalidated by a grammar
+change, became a permanent silent blind spot — the operator would believe they
+had coverage that could never fire.
+
+Reproduced before fixing: a rule using the common `action|contains|all` +
+`condition: 1 of selection*` raised `RuleError: Cannot parse condition at: '*'`
+and was dropped silently (verified directly against `compile_rule`).
+
+**Fix (four layers):**
+
+| Layer | Change |
+|---|---|
+| Engine | `detection.rule_health(spec)` returns `{compiles, error, rule}` instead of raising — one implementation for every surface |
+| Runtime | the skip is logged (`WARNING cybersec.detection: detection rule <uid> cannot compile and is INERT: <reason>`), throttled to once per rule per process |
+| API | `GET /rules` adds `compiles`/`error` per rule + `summary{ok,broken,broken_uids}`; `GET /rules/coverage` adds `inert_rules` + `broken_rules`, keeps inert rules **out** of `gaps`, and counts only runnable rules in `coverage_pct` |
+| Seed + CI | `_seed_rules` compiles every shipped rule and raises `RuntimeError` naming the file; `scripts/lint_rules.py` validates `rules/*.yaml` (or a named ported file) with porting advice, run in the CI backend job |
+
+**Verified live** (preview server, rule inserted directly into SQLite to
+simulate one that became invalid after an engine change — the case no
+write-time check can catch):
+
+- `GET /api/soc/rules` → `summary: {"ok": 6, "broken": 1, "broken_uids":
+  ["legacy-inert-1"]}`; the inert rule reports `compiles: false`,
+  `error: Cannot parse condition at: '*'`, `status: active`.
+- `GET /api/soc/rules/coverage` → `inert_rules: 1`, `broken_rules:
+  [("legacy-inert-1", …)]`, `gaps: []`, `coverage_pct: 100.0` (of the 6
+  runnable rules) — previously this read 6/7 with the rule listed as a gap.
+- Two ingest batches → the INERT warning appeared **exactly once** in the
+  server log (throttle confirmed).
+- `python -m scripts.lint_rules` on the 6 shipped rules → exit 0, all compile.
+  On a verbatim SigmaHQ rule → exit 1 with `title`/`id`/`level` mapping advice
+  and the field-modifier explanation.
+- Frontend: SOC page renders a `live`/`inert` marker per rule plus a banner
+  listing inert rules and reasons (build verified; `inert-warn`/`st.inert`
+  present in the shipped bundle).
+
+The grammar claims in `docs/15-detection-rules.md` were established by probing
+the compiler, not by reading it: `a`, `a and b`, `a or b`, `not a`,
+`(a or b) and c`, `all`, `any`, `2 of` compile; `1 of a`, `2 of (a, b)`,
+`all of (a,b)`, `1 of a*`, `all of them` do **not**. `N of` counts terms
+matched by a single event.
+
+Suite: **145 passed** (129 + 16 new in `tests/test_rule_health.py`), ruff clean
+on `app/ scripts/ tests/`.
+
+## SEC-075 adversary tradecraft (The-Xploiter) — Verified, 2026-09-22
+
+Requested integration: an offensive-security persona (pentest/bug bounty/red
+team tradecraft, exploitability validation, attack chaining, triage-ready
+reporting) inside the platform. Integration point is the **existing governed
+agent gateway** (docs/06) plus the **existing authorization model**
+(`exercises`), not a parallel subsystem — so the guardrails are the ones the
+platform already enforces and tests, extended to the new capability.
+
+**Safety architecture (what makes an offensive capability acceptable here):**
+
+| Control | Enforcement |
+|---|---|
+| Authorization | A target must appear in `exercises.targets` for an exercise in status `authorized`/`running`; `planned` grants nothing (verified live: `lab-ctf-target-01` ∈ a *planned* CTF exercise → `in_scope: false`) |
+| Deny by default | No authorized engagement ⇒ no target authorizes anything |
+| Over-broad scope | `0.0.0.0/0`, `::/0`, `*`, `any`, `all` are surfaced in `ignored_entries` with reasons and authorize **nothing** |
+| Refusals are audited | Out-of-scope attempts write `tradecraft.out_of_scope` (target + reason) to the hash-chained log — for top-level targets *and* per-step chain targets |
+| No weaponisation | The agent tool registry contains no shell/exec/scan tool (14 tools, asserted by test); the module records judgements, it does not send traffic |
+| Agent writes gated | `record_exploitability_review` and `propose_attack_chain` are consequential → human approval; read-only `list_scope_targets`/`get_finding` auto-run |
+| Persona ≠ permission | `adapter_config.persona` only edits the system prompt; unknown names refused (`400 bad_persona`) |
+
+**Two real bugs found and fixed while building it:**
+
+1. **Scope widening via `@`.** `_normalize_target` stripped everything before
+   `@` unconditionally (userinfo stripping meant for URLs). A legitimate
+   account-style scope entry — the seeded phish-sim drill authorizes
+   `test1@test.local` — collapsed to `test.local`, silently authorizing the
+   **entire domain**. Fixed: userinfo is stripped only in URL form
+   (`scheme://…`); verified live that `test1@test.local` authorizes itself and
+   not the domain.
+2. **Unaudited step targeting.** `validate_chain` scope-checked per-step
+   targets but did not report them in `out_of_scope`, so a chain step aimed at
+   an un-authorized host produced a 400 with **no audit event**. Fixed: step
+   violations are collected into `out_of_scope` and audited like top-level
+   ones (test asserts the audit row).
+
+**Verified live** (preview server, seeded data):
+
+- Persona: 8 focus areas, 5 principles, 6 use cases, 6 guardrails,
+  eJPT/OSCP/CRTO mapping.
+- Scope: `test1@test.local` → in scope (exercise 1); `lab-ctf-target-01`,
+  `10.42.0.10`, `evil.example.org`, `production-db-01` → all refused.
+- Review policy: out-of-scope → `400` + audit row; `exploitable` without
+  evidence → `400` listing all three missing requirements; `theoretical` →
+  recorded with `triage_ready: false` and the rejection note; a complete
+  review → `201`, `triage_ready: true`, scope `authorized by exercise 1`.
+- Chains: flat low→low → refused ("does not escalate"); escalating 3-step
+  chain → `201 draft`, combined impact `critical`; step-level `vuln_id` links
+  the chain into the finding's report.
+- Triage report: `READY FOR SUBMISSION` with why-it-works, preconditions,
+  reproduction, evidence, impact, attack paths, remediation, confidence.
+- Agent tools: 14 registered; the four tradecraft tools show
+  `read_only` / `requires_approval` correctly; an agent recording a review
+  against an out-of-scope target is refused by the same validator.
+- RBAC: viewer reads (200), viewer writes (403 `tradecraft.write`).
+- Audit: `tradecraft.review_recorded` ×2, `tradecraft.chain_recorded` ×2,
+  `tradecraft.out_of_scope` ×1 (target `production-db-01`); chain verify
+  `ok: true` afterwards — the tamper-evident log still validates.
+
+Suite: **191 passed** (145 + 46 new in `tests/test_tradecraft.py`), ruff clean;
+frontend typecheck + build green (288.15 kB / 80.33 kB gzip). Docs: `docs/16`
+(new), `docs/12` (endpoints), `docs/06` (personas), README index.
+
+## SEC-076 tradecraft follow-ups — Verified, 2026-09-22
+
+Three items found by **using** SEC-075 rather than shipping it. The first is a
+defect that broke the feature's own workflow.
+
+**Defect: the injection heuristic rejected legitimate engagement prose.**
+`policy.validate_args` applied `_SHELLISH_RE` to every argument field, so an
+agent recording a reproduction step reading "run
+``curl -s http://target/api``" was refused as "possible injection". A pentest
+tool that cannot record a command line is broken for the thing it is for. The
+filter was also inconsistent (`"id; whoami"` passed, `"id;whoami"` did not),
+because the pattern requires a letter straight after the semicolon.
+
+Fix: tools declare `text_fields` (prose stored as data, never interpreted).
+The heuristic is skipped for exactly those fields; they are length-capped
+instead (8000 chars/entry, 50 entries/field), and every other field keeps the
+strict check unchanged. Verified that the relaxation is **per-tool**, not
+global: the same args are still refused for `propose_attack_chain` (which does
+not declare `reproduction`), for `create_case`, and for the no-tool default;
+injection in an identifier field (`target: "$(rm -rf /)"`) is still refused.
+
+**Gap: no deliverable.** `POST /api/reports {kind: "tradecraft"}` now renders
+the engagement report — summary, findings ready for submission, chains as
+paths, and the rejected/disproven list. Live: report id 1, 349 input rows,
+sha256 recorded, `Engagement summary / Findings ready for submission / Attack
+chains / Rejected` all present in the HTML; empty-state renders "None — no
+review has met the evidence standard".
+
+**Gap: not discoverable.** The seed now ships `the-xploiter` (adapter
+`openai_compat`, local Ollama endpoint, `persona: the-xploiter`, the four
+tradecraft tools) so a fresh install exposes the persona; a test asserts the
+shipped example contains no execution primitive.
+
+**Full agent path verified live** (not just planned): a read-only task
+auto-executed (`list_scope_targets` returned the authorized targets, allowed
+only because exercise 1 is `authorized`); a consequential task returned
+`awaiting_approval` — proving the prose fix did not weaken the gate — and after
+`POST /approvals/1/decide {decision: "approve", comment: …}` the task executed
+and wrote review id 3 with `reviewed_by: agent`, verdict `exploitable`, and the
+backticks **preserved intact** in the stored reproduction text. The approval
+vocabulary is `approve`/`reject` (`bad_decision` on anything else).
+
+**Defect found by auditing a claim in the new code:** `_fingerprint`'s
+docstring promised that URL/port noise and severity wording would not change
+the dedupe key, but it only lower-cased the target and kept severity words —
+so the same finding submitted as ``https://lab-web-01:8443/x "SQL Injection
+(critical)"`` and ``lab-web-01 "sql injection"`` landed in **two** clusters,
+i.e. the signal-to-noise feature silently did nothing for the most common
+re-submission. Fixed: the target is normalised exactly as scope matching
+normalises it, and severity vocabulary (`critical`…`info`, `severity`) is
+dropped from the title words. Five cases verified: scheme/port/path,
+severity wording and word order all collapse to one key, while a different
+host, a different weakness or a different CVE stay separate.
+
+**Stale release gate found and corrected:** `docs/14` still instructed the
+approver to verify "Login rate limit … at the edge (Caddyfile: 50r/10s per
+IP)" — a control SEC-073 moved into the application. An approver following the
+checklist would have looked for it in the Caddyfile, not found it, and either
+ticked the box anyway or blocked the release. The checklist now carries the
+command-level in-app check, plus the SEC-073/074/075 gates (Caddyfile loads on
+the stock image, `/metrics` 403 on the edge, JSON 404 for unknown API paths,
+`lint_rules` exit 0, tradecraft scope + audit check).
+
+**Reports UI gap:** the kind dropdown was hardcoded to the five original kinds,
+so the new engagement deliverable was API-only. `Reports.tsx` now lists
+`tradecraft`.
+
+### SEC-077 — authorization windows are enforced (not decorative)
+
+**Defect found in the course of SEC-076 verification.** Exercised the scope guard
+against the seeded engagement and found the authorization window was never
+evaluated: `10.42.0.10` was listed as *usable* on **2026-09-22** from an
+engagement whose window had ended **2026-09-13**. The guard rested on
+`status IN ('authorized','running')` alone, so a written authorization silently
+outlived the permission it rests on — the one bound a pentest engagement
+actually turns on. The seed made it invisible by carrying an already-lapsed
+window (09-12 → 09-13).
+
+Fixed in `app/services/tradecraft.py`:
+
+- `_window_state(starts_at, ends_at, today)` → `expired` / `not_started` /
+  `active` / `open`. Missing dates = `open` (no window claimed, reported as
+  open-ended rather than quietly trusted). Inclusive of the last day.
+- `authorized_targets()` marks entries of a lapsed or not-yet-started
+  engagement unusable and carries `starts_at`/`ends_at`/`window_state` per row.
+- `check_target()` refuses with the **real cause**: *"target matches exercise 1
+  (Synthetic Phish Drill Q3), but that engagement does not authorize work right
+  now: authorization window ended 2020-01-31 — renew the engagement"*. The old
+  generic "not listed in any exercise" would have sent an operator hunting for a
+  missing entry when the fix is to renew the engagement.
+- `scope_summary()` adds `expired_engagements`; the rule text states the window
+  requirement. `/tradecraft` shows a **window_state** column, an explicit
+  lapsed-engagement warning block, and the stat card now reads "in-force
+  authorization windows".
+- Seed: the demo engagement's window now extends 30 days past today, with a
+  comment explaining why an example must not be born expired (a test asserts it).
+
+Verified (live, preview server on :8080, DB window set to expire 2026-09-01):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | `GET /api/tradecraft/scope` before fix | `10.42.0.10` usable on 09-22 despite window ending 09-13 — **BUG** |
+| 2 | Review against lapsed engagement | `400 bad_review`; refusal names exercise, window and fix |
+| 3 | Same review after renewal (window to 11-21) | `201` recorded, `window_state: active` |
+| 4 | `expired_engagements` in scope summary | `[[1, "Synthetic Phish Drill Q3", "authorization window ended 2026-09-01 — renew the engagement"]]` |
+| 5 | Future window (2099) | refused, reason "not in force yet", not usable |
+| 6 | No window recorded | `window_state: open`, usable — and labelled as open-ended |
+| 7 | Over-broad entry (`0.0.0.0/0`) | refused with "over-broad scope entry authorizes nothing" |
+| 8 | Unrelated host | generic "not listed in any exercise" message retained |
+
+Also in this pass: the `exploitable` refusal now states the reproduction minimum
+("at least 20 characters") — the previous wording rejected an undersized
+reproduction without saying what size was expected, which reads as a false
+negative to the person who just wrote it.
+
+Suite 214 → **222 passed**, ruff clean, `lint_rules` 6/6 compile, frontend
+typecheck + build green (290.66 kB / 81.07 kB gzip).
+
+### SEC-078 — the approval gate could execute one task twice
+
+**Defect found by auditing the approval guard rather than assuming it.** The
+decision handler read the approval, checked `status != 'pending'` in Python, and
+then wrote `UPDATE approvals SET status = ... WHERE id = ?` — a read followed by
+an unguarded write. Under the interleaving two concurrent approves produce, both
+requests pass the check and both proceed:
+
+```
+request A reads status: pending
+request B reads status: pending
+B's UPDATE ... WHERE id=1 affected rows: 1  -> B believes it decided the approval
+pending left: 0                             -> both requests conclude "execute the tool"
+decided_by ends as: B                       -> A's decision is silently overwritten
+```
+
+The consequence is a governance failure, not a cosmetic one: the
+consequential tool runs **twice** (one approved action executed twice), and the
+recorded approver becomes whichever request wrote last.
+
+Fixed with guarded transitions (`app/routers/agents.py`):
+
+- The decision is a compare-and-set: `UPDATE ... WHERE id = ? AND status =
+  'pending'`; `rowcount != 1` ⇒ `409 already_decided`. Exactly one caller can
+  move an approval out of `pending`.
+- The task is claimed atomically: `UPDATE agent_tasks SET status='running' ...
+  WHERE id = ? AND status = 'awaiting_approval'`. Only the claimer executes. A
+  second approval on a claimed task is approved but audited
+  `{"executed": false, "note": "task already claimed by another approval"}` —
+  visible, rather than a silent second run.
+
+Verified live (preview :8080, six simultaneous approves of one approval):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | 6 concurrent `POST /approvals/3/decide` | `req4:200`, other five `409 already_decided` |
+| 2 | Cases created for that task | **1** (count 1 → 2 overall, one title match) |
+| 3 | `approval.executed` audit rows for the approval | exactly **1** (`{"errors":[],"task_id":5}`) |
+| 4 | Task status | `completed` |
+| 5 | A second approval (id 4) for the same, already-claimed task | `200 approved`, audited `executed:false`, cases stayed at 2 |
+
+Note the two-layer behaviour visible in the live run: four of the losers were
+stopped by the cheap pre-check, one reached the compare-and-set and was stopped
+there — the guard no longer depends on timing luck.
+
+Tests: `test_stale_read_cannot_double_decide` drives the exact stale-read
+interleaving (approval committed behind the caller's back, stale snapshot
+returned) and asserts `409` plus *no* side effect; 
+`test_second_approval_on_claimed_task_does_not_reexecute` asserts the second
+approver is audited `executed:false` and the case count is unchanged.
+
+Suite 222 → **224 passed**, ruff clean.
+
+### SEC-079 — the SPA offered statuses the API rejects, and hid the real ones
+
+**Defect class found by sweeping every picker in the SPA against the API's
+accepted values** (the same class that produced the missing `tradecraft` report
+kind in SEC-076). Silently, three screens were wrong in both directions — they
+offered values the API refuses and omitted values it accepts, so the omission
+looked like a broken feature:
+
+| Screen | Offered by the UI, rejected by the API | Accepted by the API, unreachable in the UI |
+|--------|----------------------------------------|--------------------------------------------|
+| `/soc` triage | `false_positive` → live `400 bad_status` | `dismissed` — **the way a false positive is actually recorded** |
+| `/incidents` case status | `containment`, `recovered` → live `400 bad_status` | `contained`, `mitigated` (also unfilterable) |
+| `/incidents` task status | — | `canceled` |
+| `/cloud` posture | — (the API validated nothing at all) | — |
+
+The first row is the serious one: an analyst following the UI to dismiss an
+alert as a false positive got a `400`, and there was no way to record the
+outcome the platform actually supports.
+
+Fixes:
+- `Soc.tsx`, `Incidents.tsx` pickers now carry the API's exact vocabulary;
+  `Incidents.tsx` task statuses gained `canceled`.
+- `routers/cloud.py` gained the validation it never had: posture `status` and
+  `severity` are checked on create and update (`400 bad_status` /
+  `bad_severity` with the allowed list). The existing test asserted the old
+  behaviour with a third vocabulary — `status: "remediated"`, a word the UI
+  (`resolved`) and the seed (`open`) never used — which is precisely how the
+  drift survived; it now asserts `400` for the unknown value and `200` for
+  `resolved`.
+- **`tests/test_enum_parity.py` (new, 10 tests)** reads the SPA source and
+  compares every named picker list with the set the API accepts — alerts,
+  cases, case tasks, GRC controls, GRC risks, cloud posture, vulns, report
+  kinds, roles — plus the inline severity lists. Drift now fails in CI with the
+  two-way diff in the message. Verified non-vacuous: reintroducing
+  `false_positive` fails with *"offered by the UI but rejected by the API:
+  ['false_positive'] / accepted by the API but unreachable in the UI:
+  ['dismissed']"*, and the suite passes again once restored.
+
+Suite 224 → **234 passed**, ruff clean, frontend typecheck + build green
+(290.67 kB / 81.08 kB gzip).
+
+### SEC-080 — the documented error envelope was not the real one
+
+**Defect found by testing a documented claim instead of the code.** docs/12
+states: *"non-2xx bodies carry `detail = {code, message}` … Clients key off
+`code`"*. Application errors do. FastAPI's request-validation failures did not:
+
+```
+POST /api/cases {"title": "x"}  ->  422
+{"detail":[{"type":"string_too_short","loc":["body","title"],"msg":"String should have
+ at least 3 characters","input":"x","ctx":{"min_length":3}}]}
+```
+
+`detail` is a **list**, so a client written against the documented contract reads
+`detail.code` → `undefined` (the SPA already branched on the array shape, which
+is how the inconsistency stayed invisible in the UI while remaining wrong for
+every other consumer).
+
+Fixed in `app/main.py`: a `RequestValidationError` handler keeps the correct
+`422` status and returns the documented envelope, preserving the field-level
+detail:
+
+```json
+{"detail": {"code": "invalid_request",
+            "message": "title: String should have at least 3 characters",
+            "errors": [{"field": "title", "msg": "...", "type": "string_too_short"}]}}
+```
+
+`message` names the first three offending fields (then `(+N more)`), and no
+internals (`Traceback`, module paths, submitted values beyond the field name)
+appear in the response. docs/12 now documents the 422 shape and the new codes.
+
+Verified live: `{"title":"x"}` → `422 invalid_request` with
+`errors[0].field == "title"`; the same request previously returned a bare list.
+
+Suite 234 → **235 passed**, ruff clean.
+
+### SEC-081 — a critical alert could be dismissed with no reason recorded
+
+**Defect found while verifying SEC-080's live behaviour.** Dismissing an alert as
+a false positive — the highest-volume judgement call in a SOC — recorded
+*nothing*:
+
+```
+PATCH /api/soc/alerts/4 {"status":"dismissed"}   -> 200
+{"id":4, ..., "severity":"critical", "status":"dismissed", "notes":null, "case_id":null}
+```
+
+A critical-severity alert ("Potential Data Exfiltration") was closed without
+action and the audit trail carried the status change but no reason. The rest of
+the platform does not work this way: a chain status change requires a rationale,
+a release requires its checklist and approval, an exploitability verdict
+requires a mechanism. "Why was this alert closed without action?" — the first
+question any audit or handover asks — had no answer.
+
+Fixed: `PATCH /soc/alerts/{id}` refuses `dismissed` without a non-blank note
+(`400 note_required`), the note is stored on the alert and included in the
+`alert.updated` audit detail, and the triage panel gained a **Disposition note**
+field so the reason is captured at the moment of the decision rather than
+discovered by the API rejection. Other statuses (`triaging`, `confirmed`,
+`closed`) are unchanged — the rule is about terminal false-positive calls, not
+about adding friction to triage.
+
+Verified live: `{"status":"dismissed"}` → `400 note_required` with the alert
+unchanged; `{"status":"dismissed","notes":"   "}` → `400` (whitespace is not a
+reason); with a real note → `200 dismissed` and the note present on the row and
+in the audit detail.
+
+Suite 235 → **236 passed**, ruff clean, frontend green (291.02 kB / 81.20 kB).
+
+### SEC-082 — risk acceptance could be recorded without a reason
+
+**Same class as SEC-081, found by asking where else a judgement writes nothing.**
+The platform has a purpose-built record for accepting a finding's risk
+(`POST /api/vulns/{fid}/exceptions`: rationale ≥10 chars, `approved_by`,
+optional `expires_at`). But the generic status PATCH also accepted
+`status: "accepted_risk"`:
+
+```
+PATCH /api/vulns/1 {"status":"accepted_risk"}  ->  200, no reason,
+                                                   no approver, no expiry
+```
+
+One decision had two representations, and the second one recorded neither why
+nor until when — it also silently defeated the expiry reminder that makes an
+accepted risk revisitable. The UI offered `accepted_risk` in its status dropdown
+right next to the exception form that records the reasoning.
+
+Fixed:
+- `PATCH /api/vulns/{fid}` refuses `accepted_risk` with
+  `400 use_exception_endpoint`, naming the endpoint that captures the decision.
+  `PATCHABLE_STATUSES` is the settable set; the exception endpoint remains the
+  only path to `accepted_risk`.
+- The UI's status dropdown offers only settable statuses and points at the
+  exception form; `accepted_risk` stays in the filter list (filtering must
+  still work).
+- Finding `severity` is validated against
+  `{critical, high, medium, low, info}` on create and import — an imported
+  `severity: "banana"` used to be stored and counted in no view. CSV imports
+  report the rejection per row (`errors` + `error_sample`) rather than failing
+  the whole file. The UI's severity filter, which omitted `info`, now offers it.
+- `tests/test_enum_parity.py` covers the new settable-status list and the vuln
+  severity filter.
+
+Suite 236 → **239 passed**, ruff clean, frontend green (291.18 kB / 81.24 kB).
+
+### SEC-083 — an engagement's lifecycle was not one-way (authority could be withdrawn or restored silently)
+
+**Found by auditing the state machine itself rather than the happy path.** The
+status of an exercise is not a label: it is the authority the scope guard reads,
+the trigger that opens a run, and the record of whether offensive work was ever
+permitted. The guard only prevented moving *forward* without authorization:
+
+```
+running  -> planned     : 200, no reason  (seeded engagement 1)
+  authorized targets: 2 -> 0     # live authorization evaporated mid-engagement
+aborted  -> authorized  : 200
+  authorized targets: 0 -> 2     # an explicitly stopped engagement was re-armed
+aborted (no reason)     : 200     # stopping early recorded no justification
+```
+
+Three consequences, all governance-relevant: in-flight tradecraft against a
+mission target starts being refused and audited as out-of-scope *attempts* while
+the engagement is still notionally live; a stopped engagement can be restored to
+full authority in one unremarked call; and a termination leaves no record of why
+it happened.
+
+Fixed (`app/routers/exercises.py`): an explicit `ALLOWED_TRANSITIONS` table makes
+the lifecycle one-way — `planned → {authorized, aborted}`,
+`authorized → {running, completed, aborted}`, `running → {completed, aborted}`,
+and `completed`/`aborted` are terminal. Anything else is
+`409 illegal_transition` carrying `from`, `to` and `allowed`, and the refusal is
+written to the audit log as `exercise.transition_denied` (a request to withdraw
+or reopen authority is a governance signal, like an out-of-scope targeting
+attempt). Closing an engagement requires a `reason` of ≥10 characters
+(`400 reason_required`), recorded on the `exercise_runs` row and in the audit
+trail. Re-sending the current status is now a no-op instead of starting a second
+`exercise_runs` row.
+
+The UI mirrored the same gap in the other direction: its Complete button showed
+a "reason required" box that it never enforced and sent `reason: undefined`, and
+there was no way to abort an engagement at all. `StatusAdvance` now enforces the
+10-character minimum (both buttons disabled with an explanation via a new
+`disabled`/`disabledReason` on `ConfirmButton`) and offers **Abort** as a
+danger-styled action.
+
+Verified live on the seeded engagement:
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | `authorized → running` | `200`, 2 targets authorized |
+| 2 | `running → planned` | `409 illegal_transition`, "lifecycle is one-way", `allowed: [aborted, completed]` |
+| 3 | authorized targets after the refusal | still **2** — authority preserved |
+| 4 | `aborted` without a reason | `400 reason_required` |
+| 5 | `aborted` with a reason | `200`; run row `result=aborted`, detail carries the reason; audit detail carries it too |
+| 6 | `aborted → authorized` | `409 illegal_transition`, `allowed: []` |
+| 7 | `planned → running` | still `409 not_authorized` (existing contract preserved) |
+| 8 | Re-sending `running` | no-op, one run row (was two) |
+
+Tests: `tests/test_exercise_lifecycle.py` (9 tests, including a table-level test
+that refuses any backwards transition except the sanctioned early exit and
+asserts the terminal states are sinks).
+
+Suite 239 → **247 passed**, ruff clean, frontend green (291.98 kB / 81.46 kB).
+
+### SEC-084 — the audit log could not see its own tail (deletion was invisible)
+
+**Found by testing the tamper-evidence claim instead of trusting it.** The audit
+log is hash-chained and the module docstring said "any modification of history is
+detectable". Modification, yes; **deletion of the newest rows, no** — a hash
+chain has nothing after the tail to notice that the tail is gone:
+
+```
+clean chain            {'ok': True,  'rows': 5}
+middle row modified    {'ok': False, 'rows': 5, 'first_bad_seq': 3}   # control: detected
+rebuilt clean          {'ok': True,  'rows': 5}
+TAIL truncated (seq>3) {'ok': True,  'rows': 3}    # rows 4 and 5 erased
+```
+
+A single `DELETE FROM audit_events WHERE seq > N` therefore removed the evidence
+of what someone had just done, and `GET /api/admin/audit/verify` confirmed the
+log was intact. The rows most worth deleting are the most recent ones.
+
+Fixed:
+
+- **`audit_anchor`** (migration `0005_audit_anchor.sql`) records how much history
+  exists — `rows`, `head_seq`, `head_hash` — updated in the same transaction as
+  every append. Deliberately its own table, not `settings`: that table has a
+  generic admin write endpoint, and an anchor an admin can rewrite proves
+  nothing.
+- The watermark is **monotonic** (`MAX(existing, actual)`). This mattered: the
+  first version of the fix let an attacker delete rows and then perform any
+  audited action, which re-blessed the shorter log and returned `ok: true`
+  again — caught while verifying the fix, and now a regression test.
+- `verify_chain()` returns a `reason` — `linkage`, `gap` or `truncated` (with
+  `missing_rows`) — so an operator knows *which* question failed. A log written
+  before anchoring existed reports `ok: true` with `reason: "unanchored"` and a
+  warning rather than a false alarm.
+- `GET /api/admin/audit/anchor` exports the anchor for off-platform archiving,
+  and the weekly runbook step records it (docs/10).
+
+**Two further holes were found while verifying this fix — both by trying to
+launder a truncation rather than by reading the code:**
+
+1. A count-only watermark was healed by later activity: deleting rows and then
+   doing anything audited re-blessed the shorter log (`ok: true` again).
+2. With the count fixed, an attacker who appended until the reused sequence
+   number reached the anchored one had the anchor adopt *their* hash — the
+   comparison needs to be strictly greater, so an append never re-points the
+   anchor at a different event.
+
+After both fixes, the boundary is explicit: a local anchor catches truncation
+while no activity has moved past the gap, and **an anchor exported earlier
+catches the rest** — sequence numbers are reused, so the row at the anchored
+`head_seq` hashes differently, and `GET /api/admin/audit/verify?head_seq=&head_hash=&rows=`
+reports `external.reason: replaced`. Verified end-to-end:
+
+```
+exported anchor {'rows': 5, 'head_seq': 5}
+clean                           ok: True
+naive truncation                ok: False, truncated, missing_rows 2
+after the attacker keeps working  local: ok: True   <- in-DB anchor moved on
+                                  exported anchor: replaced (seq 5 hashes differently)
+```
+
+Remaining honest limit (documented in docs/12, not implied away): the hash
+function is unkeyed, so an attacker who can rewrite the database *and* the
+anchor can recompute everything; only the externally kept copy is out of their
+reach — which is why the weekly runbook step exports it and now shows how to
+check against it. A keyed HMAC chain is **Proposed**, not implemented.
+
+Verified directly against the service (clean temp DB):
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | clean chain | `ok: true`, anchor rows 5 |
+| 2 | middle row modified | `ok: false`, `reason: linkage`, `first_bad_seq: 3` |
+| 3 | tail truncated | `ok: false`, `reason: truncated`, `missing_rows: 2` |
+| 4 | audited activity *after* truncation | still `ok: false` (watermark held at 5) |
+| 5 | anchor after a normal append | `rows +1`, new head hash |
+| 6 | anchor not reachable via the settings API | verified in test |
+
+Suite 247 → **250 passed** (3 new: truncation detected, healing/laundering
+prevented, anchor tracks appends), ruff clean.
+
+Suite 250 → **253 passed** (3 new: restore path containment, crafted bundle
+refused, corrupt bundle is a clean 409), ruff clean.
+
+Suite 253 → **259 passed** (6 new: TTL expiry, audited upsert + revocation,
+create-status validation, STIX validity window, PATCH preservation, MITRE payload
+parity), ruff clean.
+
+Suite 259 → **263 passed** (4 new/updated: posture partial update, report title,
+run note, agent rename), ruff clean.
+
+Suite 263 → **265 passed** (2 new: the JSON-as-text sweep over every GET route,
+and the SPA `fmtJson` rendering guard), ruff clean.
+
+Suite 265 → **267 passed** (2 new: case reopen clears `closed_at`, finding reopen
+clears `fixed_at`), ruff clean.
+
+Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
+
+Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
+fails the run, `query_events` filtered/unfiltered), ruff clean.
+
+Suite 271 → … → 289 → **291 passed** (1 new: alert trigger runs auto playbooks and suggests
+the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
+schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
+tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
+an edited bundle is refused by the recorded hash, unknown provenance is reported and
+gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
+round-trips and verifies, and the seeded evidence points at a real file) 282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
+positives) 284 → 285 (1 new: STIX imports validate confidence and normalise
+timestamps) 285 → 287 (2 new: the labelled alert series counts only open alerts,
+and expired sessions are not active) 287 → 289 (2 new: a scan run's counters
+describe the run, and an import does not rewrite a reported status) and 289 → 291
+(2 new: a scope change is audited with before/after, and an unreadable window is
+refused and inert), 291 → 292 (1 new: an oversized number is a client error, not
+a 500) and 292 → 295 (3 new: a null into a NOT NULL column is refused, a falsy id no
+longer skips its existence check, and the constraint net answers documented codes)
+295 → 296 (1 new: a case's triage fields are enums on create *and* update) and
+296 → 298 (2 new: a nullable field can be cleared with an explicit null, on alerts and
+on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
+never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
+and timestamps are validated, and the import always reports the run's status),
+300 → 305 (5 new: the lab range registry and its cross-checks ×2, the operator
+self-diagnosis, the baseline security headers, and the doctor's access rule split out),
+ruff clean.
+
+**Current totals:** **305 tests pass** (`pytest -q`, ~4 min), ruff clean,
+`scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
+(294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-117 series was reproduced first (as a failing check or a live request) and
+re-verified afterwards, live where the defect was live.
+
+## Known limitations & blocked items
+- **Capacity (SEC-043)**: fully measured — in-process (3.9k/6.7k ev/s) and
+  live-uvicorn HTTP (4,501 ev/s @20k, p95 90ms). Multi-client concurrency
+  remains unexercised (no requirement today; ADR-008 trigger list governs).
+- **Restore rehearsal (SEC-063)**: **both modes verified** — in-process
+  (342/342, RTO 0.01s) and live (423/423, RTO 16.68s, real server
+  stop/start). Live-mode RTO on this host, small dataset; production RTO
+  scales with DB size (see ADR-005/007).
+- **Production deployment (ADR-007)**: compose/Caddyfile/env templates +
+  Dockerfile + supply-chain CI now exist; the actual staging/production
+  bring-up is **Proposed** (roadmap Phases 8–9) — not exercised here.
+- **Network isolation (SEC-040)**: `infra/network/nftables.conf` +
+  `validate_flows.sh` encode the docs/03 flow matrix; they are for the target
+  host and **unapplied** here (no authorized target host in this sandbox) —
+  treat enforcement as **Proposed/Blocked on a real host**.
+- **Real-Sigma-pack porting**: the engine is a documented subset and porting
+  is deliberately manual (docs/15); `scripts/lint_rules.py` + the seed guard +
+  `/rules` health reporting now catch out-of-subset rules (SEC-074), so an
+  inert rule can no longer hide. What remains unbuilt: an **automatic
+  translator** from full Sigma to this subset (judged not worth building — a
+  silently mistranslated regex/`|all` is worse than a hand rewrite).
+- **Agent LLM adapters (SEC-050)**: now wired (builtin/openai_compat/cli) and
+  tested with a stubbed LLM + real subprocess; a live local model end-to-end
+  (e.g. Ollama) is not exercised in this sandbox — **Proposed**.
+- **Do not run two pytest processes at once**: `tests/conftest.py` uses one
+  fixed data dir (`tests/.testdata`) and wipes it per test, so a second run
+  clobbers the first (observed as `sqlite3.IntegrityError: UNIQUE constraint
+  failed` during seeding and unrelated failures). One run at a time.
+- Sandbox workspace restores wipe excluded dirs (`.venv`, `data/`,
+  `node_modules`, `dist`); recovery is documented in this file's
+  environment section and takes < 5 minutes (venv + pip install +
+  `npm install && npm run build` + `python -m app.seed.seed_demo`).
+  Happened twice (03:48 and 05:07 UTC); the second also reset the local
+  branch pointer to the base commit — fixed with
+  `git fetch origin <branch> && git reset --soft FETCH_HEAD`
+  (working tree untouched), verified via `git status` before continuing.
+
+### SEC-085 — restore path traversal (fixed)
+
+**Was:** `POST /api/admin/backup/restore` guarded its path with
+`"backups" not in str(path)` — a substring test reported as containment — and
+`verify_bundle` iterated only over `manifest["files"]`, so an **unlisted** tar
+member was invisible to it. `restore_from` then joined `evidence/<member>` onto
+the evidence directory, so `evidence/../../../../../../tmp/x` was written
+outside the store.
+
+**Reproduced (before fix):** a bundle cloned from a real backup with one extra
+member `evidence/../../../../../../tmp/escaped_by_restore.txt` **passed
+verification** and wrote `/tmp/escaped_by_restore.txt` containing
+`PWNED-BY-TAR-TRAVERSAL`; separately `"backups" in "/tmp/evil-backups/stale.db"`
+was `True`, so the guard admitted a bundle from anywhere.
+
+**Fixed:** the endpoint resolves the path and requires a real file inside
+`settings.backups_dir`; `verify_bundle` additionally rejects unlisted members,
+symlinks/hardlinks and absolute/`..` member names; `restore_from` copies only
+members that are declared in the manifest *and* resolve inside the evidence
+directory, raising otherwise.
+
+**Live (after fix, this host):** `/tmp/evil-backups/stale.db` → `400 bad_path`;
+`data/backups/../../data/cybersec.db` → `400 bad_path`; crafted bundle with the
+traversal members above → `409 verify_failed` listing
+`unsafe:evidence/../../../../../../tmp/pwned_live.txt`, `unsafe:/tmp/pwned_abs.txt`
+and the matching `unlisted:` entries, with **no** file created outside the store;
+`POST /api/admin/backup` → `POST /api/admin/backup/restore` round-trip still
+`200 {"ok":true}`; `/api/healthz` healthy afterwards.
+
+### SEC-086 — corrupt bundles returned an opaque 500 (fixed)
+
+Found while verifying SEC-085. A file inside `data/backups` that was not a
+readable archive (interrupted copy, disk full, wrong file) raised out of
+`verify_bundle` and surfaced as `500 internal_error`; the operator had to read
+server logs to learn their backup was unreadable. Worse, the 409 branch built
+its message as `str(v.get("bad"))`, which renders as `"None"` for the
+`error`-style rejections. Now `409 verify_failed` with
+`unreadable bundle: ReadError: not a gzip file` (also for truncated archives and
+manifests without a `files` map), `restore_refused` for defence-in-depth
+refusals, and the app stays healthy. Both cases covered by tests.
+
+### SEC-087 — indicator TTL was inert; the upsert was unaudited (fixed)
+
+**Was:** `threat_indicators.ttl_hours` was accepted, validated (`gt=0`) and
+stored, and the SPA even advertised "confidence, **expiry**, and
+cross-correlation" with an `Expires` column bound to `expires_at` — but nothing
+ever read the field: no expiry path existed anywhere in the codebase, and
+`/indicators/correlate` matched every `status = 'active'` row regardless of age,
+so a stale IOC stayed live forever and the `Expires` column always rendered
+"—". The STIX importer dropped `valid_until` entirely (an IOC that expired in the
+feed arrived `active`). Separately, re-sighting an existing indicator updated
+`confidence`/`last_seen` with **no audit entry**, though docs/12 promises one per
+state change; `POST` also silently ignored `status` (a `revoked` indicator came
+back `active` and was correlated).
+
+**Fixed:** expiry is now lazy but real — `expire_due()` runs on the read paths
+(list, correlate) and before a re-sighting, flips elapsed-TTL rows to `expired`,
+and writes one system-actor `intel.indicators.expired` event (idempotent: only
+rows still `active` are touched, so no repeat entries); `expires_at` is returned
+per indicator; STIX `valid_from`/`valid_until` map onto `first_seen`/`ttl_hours`
+with already-past windows imported `expired` (`expired_on_arrival`); the upsert
+is audited and revives `expired` rows on fresh evidence while never undoing a
+human `revoked`; `status` is validated and honoured on create.
+
+**Live (after fix):** created `ttl_hours=1`, backdated `first_seen` by 2h →
+`status: expired`, `expires_at: 2026-09-23T01:25:58Z`, audit
+`intel.indicators.expired {"count":1,"ids":[7],"reason":"ttl_elapsed"}`.
+
+### SEC-088 — `PATCH` overwrote every field it was not given (fixed)
+
+**Was:** the update route took the create model: `type`/`value` were *required*
+but never written, while every other column was assigned from the body — so an
+omitted field was NULLed. **Live-verified before the fix:** on a seeded indicator,
+`PATCH {"confidence": 10}` took `source_id` from `1` to `None`,
+`mitre_tactics` from `["credential-access"]` to `None`, and erased its notes;
+and the SPA's status dropdown sent exactly such a partial body, so one status
+change destroyed the indicator's provenance. `PATCH {"type": "port"}` returned
+`200` and changed nothing.
+
+**Fixed:** a dedicated `IndicatorUpdateIn` (all optional) writes only
+`model_fields_set`, honours and validates `type`/`value` (with a
+`409 duplicate_indicator` guard so edits cannot break the create-dedupe key),
+refuses an empty body with `400 no_changes`, and audits the changed field names.
+
+**Live (after fix):** the same confidence-only PATCH preserved `source_id: 1`,
+`mitre_tactics: ["credential-access"]` and the notes; a status-only PATCH
+preserved them too; audit `intel.indicator.updated {"changed":["confidence"]}`.
+
+### SEC-089 — the SPA's MITRE field could never be saved (fixed)
+
+**Was:** `POST /api/intel/indicators` takes `mitre_tactics: list[str]`, but the
+SPA sent the raw input string. **Live-verified before the fix:**
+`{"mitre_tactics": "T1041"}` → `422 invalid_request` ("Input should be a valid
+list"), so filling in the MITRE tactics box on "New indicator" always failed;
+the API also returned the column as raw JSON text (`'["T1041"]'`), which is why
+the table rendered that literal. (The other four list-typed payloads in the SPA —
+agent tools, exercise targets, tradecraft evidence, chain steps — were checked
+and already send arrays.)
+
+**Fixed:** the form sends `mitre.split(",")`-derived arrays, the API returns
+parsed lists (`_shape()`), the table joins them, and a source-parity test locks
+the shape. The report generator renders the MITRE cell as text
+(`_fmt_list`) instead of raw JSON.
+
+**Live (after fix):** `{"mitre_tactics": ["T1041","T1110"]}` → `201`, round-trips
+as `["T1041","T1110"]`; a bare string still returns the documented 422 envelope.
+
+### SEC-090 — request fields that were accepted and never applied (fixed)
+
+Found with an AST sweep of every router: for each Pydantic request model, which
+declared fields does the handler never read? (The sweep has to exclude
+`model_dump()`/`getattr()`/`model_fields_set` handlers and nested helpers, which
+is how SEC-088 hid.) Four sites discarded input:
+
+| Route | Field(s) dropped | Consequence |
+|---|---|---|
+| `PATCH /cloud/posture/{id}` | took the *create* model: `asset_id`/`rule_id`/`title` required and unwritten, `detail` written | **data loss** — the SPA's status change omits `detail`, so the evidence text was wiped on a `200` |
+| `POST /reports` | `title` | the SPA's title box had no effect; a generated title was stored and rendered |
+| `POST /automation/{id}/run` | `note` | the operator's stated reason for the run vanished (scheduler runs, approvals, dismissals and engagements all keep theirs) |
+| `PATCH /agents/{id}` · `PATCH /assets/{id}` | `name` | a rename returned `200` and changed nothing |
+
+**Live-verified before the fix:** `PATCH /api/cloud/posture/4 {"asset_id":1,
+"rule_id":"CIS-1.1","title":"placeholder","status":"resolved"}` → `200`, and
+`detail` went from `"cert expiry 2026-09-27."` to `None`; the sent
+`asset_id`/`rule_id`/`title` were ignored.
+
+**Fixed:** `PostureUpdateIn` is a true partial update (only sent fields written,
+`400 no_changes` when empty, `400 bad_asset` for an unknown asset, `changed` in
+the audit detail); `title` is threaded through `ReportBuilder.build()` to every
+kind (and escaped in the artefact); the run note is kept on the run result and
+the audit entry for all four outcomes; renames are applied with a uniqueness
+check, `renamed_from` in the audit detail, and an explicit
+`409 rename_not_supported` for the automation identity the runner resolves by
+name. Both SPA payloads were narrowed to the field being changed.
+
+**Live (after fix):** posture status change keeps `detail`; `POST /reports
+{"title": "Q3 board summary"}` stores and renders that title (and escapes HTML in
+it); the dry-run note round-trips to the run record and audit; renaming
+`opencode-repo` → `repo-scanner` works (audit `renamed_from`), a collision is
+`409 exists`, and renaming `internal-automation` is `409 rename_not_supported`.
+
+### SEC-091 — JSON columns returned as text; two SPA pages crashed (fixed)
+
+Found by walking every GET route in the live OpenAPI schema and flagging string
+values that parse as JSON containers — the same family as SEC-089, but systemic.
+Before the fix the sweep reported **53 leaks** across 11 routes, and the detail
+routes were inconsistent with their own list routes (`GET /api/exercises` decoded
+`targets`, `GET /api/exercises/{id}` did not).
+
+Two of them were not cosmetic. The SPA reads those fields as arrays:
+
+- `Grc.tsx` — `r.mitigations?.join("; ")`
+- `Exercises.tsx` — `e.targets?.join(", ")` (list and detail views)
+
+**Live-verified before the fix:** `GET /api/grc/risks` returned
+`mitigations = '[\"Tool allowlist\", \"Approval gates\", \"Evals in CI\"]'`
+(a string) and `GET /api/exercises/1` the same shape for `targets`; evaluated in
+node with those exact values, both expressions throw
+`TypeError: ... .join is not a function` during render. A throw inside a React 18
+render with no error boundary unmounts the whole root, so the tab showed a blank
+app. (`Soc.tsx`'s `JSON.stringify(e.data)` merely displayed `"{\"pid\": 37446}"`.)
+
+**Fixed:** `db.decode_json` / `db.decode_rows` applied at every flagged response
+site — events `data`, alerts `event_ids` (+ nested event `data`), GRC risk
+`mitigations` (list/create/update), exercise `targets`/`meta`/`runs[].detail`,
+asset `meta`, cloud asset `meta`, posture `meta`, scan-run `meta`, agent task
+`result`/`request` and nested `tool_calls[].args/result`, and audit `detail`.
+Tests that had learned to `db.jload()` an API response were corrected to use the
+object.
+
+**Live (after fix):** the sweep reports **0 leaks across 59 GET routes**; with the
+real payloads, `mitigations?.join("; ")` renders
+`Tool allowlist; Approval gates; Evals in CI`, `targets?.join(", ")` renders
+`test1@test.local, test2@test.local`, `event_ids` is an 8-element array, and
+`e.data.pid` is a number.
+
+**Regression guard:** `test_no_get_route_returns_json_as_text` does the same walk
+inside the suite (>40 routes asserted); verified non-vacuous by removing one
+decode and watching it fail with the original payload.
+
+### SEC-092 — reopen left the closure timestamps set (fixed)
+
+**Was:** `cases.closed_at` was stamped when a case closed and never cleared, so a
+reopened case still reported a closure time; `vuln_findings.fixed_at` had the same
+defect, and both were *rewritten* if the same terminal status was sent twice.
+
+**Live-verified before the fix:** close → `closed_at: 2026-09-23T02:54:55Z`,
+reopen to `investigating` → `{"status": "investigating", "closed_at":
+"2026-09-23T02:54:55Z"}`. Consumers: the case report prints `created_at` and
+`closed_at` side by side (`services/report.py`), and the SPA's case header renders
+`created → closed` (`Incidents.tsx`) — both presented an active case as closed.
+
+**Fixed:** the timestamp is cleared on the way out of the state and kept on a
+repeat transition, with the reopen made visible in the case timeline
+(`Status → investigating (reopened from closed)`) and in the audit detail
+(`{from_status, to_status, reopened}`); findings carry `from_status`/`to_status`
+too.
+
+**Live (after fix):** close → `closed_at` set; reopen → `closed_at: null` with the
+timeline and audit entries above; a finding returns `fixed_at: null` after
+reopening.
+
+### SEC-093 — an aggregated alert under-reported its own count (fixed)
+
+Found by cross-checking denormalized counters against the rows they summarize:
+every existing alert had `count == len(event_ids)`, because the seed writes both
+from the same group. Driving the ingest path twice broke it.
+
+**Was:** on the aggregation (update) path the router merged the new event ids into
+`event_ids` but wrote `count = group["count"]` — *this batch's* matched events,
+not the merged total. `count` is what the SOC list column and the alert detail
+panel display ("Count"), so the more an alert fired over time, the more it
+under-reported.
+
+**Live-verified before the fix:** an SSH-brute-force alert with 8 events and 8
+ids; ingesting 6 more → `(count, len(event_ids)) = (6, 14)`.
+
+**Fixed:** `count = len(merged)` (the merged, de-duplicated set), so the count and
+the id list stay in step at every aggregation, and the ingest response reports the
+same number.
+
+**Live (after fix):** 6 events → alert created with `count: 6`;
+4 more → `count: 10` with 10 ids (the old code would have said 4), the
+`/api/soc/alerts` column shows 10, and re-sending an idempotent batch inserts
+nothing and leaves the count unchanged.
+
+### SEC-094 — the playbook approval gate was a dead end (fixed)
+
+Found while probing the automation workflow: run a playbook whose plan needs
+approval and try to approve it.
+
+**Was:** `run_playbook` inserted `approvals.task_id = 0` even though the schema
+documents the column as "agent_tasks(id) for agent approvals, or a
+playbook_runs(id) for automation". Two consequences, both live-verified:
+
+1. **Invisible** — `GET /api/agents/approvals` (the queue the SPA renders) used an
+   `INNER JOIN agent_tasks ON t.id = ap.task_id`, so an approval with `task_id = 0`
+   was dropped. A run reached `awaiting_approval` and the queue showed *nothing*;
+   there was no path in the product to approve it.
+2. **Undecidable** — deciding it by id fell through to the agent-task path, where
+   `task = None` and `task["agent_id"]` raised `TypeError` → an opaque **500**,
+   *after* the compare-and-set status change had already been committed. The
+   approval was consumed, the run stayed `pending` forever, and nothing was
+   executed or audited.
+
+**Fixed:** the approval stores the run id; the queue LEFT JOINs both owners and
+labels `kind: playbook` with the playbook name and run status; the decision path
+branches on the `playbook:` action prefix — approving the last pending approval
+for a run compare-and-set-claims it (`pending → running`) and executes its
+validated plan with the automation agent, rejecting fails the run with the reason,
+and a missing owner row is a `409 missing_run`/`missing_task` instead of a 500.
+The SPA labels playbook approvals.
+
+**Live (after fix):** run → `awaiting_approval`, queue shows
+`{task_id: 7, kind: playbook, playbook_name: exfil-response-check, run_status: pending}`;
+approve → `{executed: true, run_status: completed}`, all three steps ran and the
+`create_case` step created the case; a second decision → `409 already_decided`;
+reject → run `failed` with `{error: approval_rejected, reason: ...}`, the case
+count unchanged, audited as `playbook.rejected {applied: true}`.
+
+### SEC-095 — the `query_events` tool was broken on both paths (fixed)
+
+Found while verifying SEC-094: the approved playbook run reported
+`query_events failed: 'tuple' object has no attribute 'append'`.
+
+**Was:** `_query_events` initialised `sql, params = "...", ()` and then called
+`params.append(...)` for an `action`/`host` filter (AttributeError), and its
+unfiltered path evaluated `min(50, None)` (TypeError) — which it also reported as
+`returned`. So the tool never worked: any agent task or playbook step that queried
+events failed, including the seeded `exfil-response-check` playbook's first step.
+
+**Fixed:** `params` is a list, and `returned` is the actual row count with the
+`limit` reported separately.
+
+**Verified:** a sweep that invokes every read-only tool in the registry with and
+without arguments now passes for all of them (the consequential tools are
+skipped), and live an agent task using `query_events` with a filter completes and
+returns 8 events; the playbook run above executed all three steps with
+`errors: []`.
+
+### SEC-096 — alert-triggered playbook runs were inert (fixed)
+
+Found by following the SEC-094 thread to the other way a run is created. Live
+evidence in the seeded database: three `playbook_runs` rows sitting at `pending`
+with `trigger: on_alert:N` and **no result at all**.
+
+**Was:** `_trigger_on_alert` inserted a `pending` run and nothing else — it never
+planned the task, never raised the approvals a consequential plan needs, never
+executed a read-only plan, and there was **no endpoint that could progress such a
+run**. So every triggered run was inert forever, including `auto_run = 1`
+playbooks: the seeded `alert-triggered` rows, and `exfil-response-check`
+(`on_alert:critical`, `auto_run = 1`) after a critical alert, all stayed `pending`.
+
+**Fixed:** the plan/execute/await logic is one shared helper
+(`_plan_and_execute`) used by the manual endpoint, the trigger, and a new
+`POST /api/automation/runs/{id}/execute`. The trigger now honours `auto_run`
+(executing read-only plans, waiting on approvals for consequential ones, failing
+loudly on a denied plan) and always audits `playbook.triggered` with the alert id,
+severity and outcome; runs that are *not* auto-run are left as actionable
+suggestions. The execute endpoint claims the run with a compare-and-set and
+refuses a run that is already awaiting approval (`409 awaiting_approval`), and the
+SPA's run table gained a **Run** action for suggestions.
+
+**Live (after fix):** a high alert → run 7 `pending` (suggested, audited
+`{auto_run: false, suggested: true}`) → `POST /runs/7/execute` → `completed` with
+both read-only tools executed; a critical alert → run 9 auto-triggered
+(`{auto_run: true, outcome: awaiting_approval}`), an approval raised with
+`kind: playbook`, force-execute refused `409 awaiting_approval`, and approving it
+completed the run.
+
+### SEC-097 — a plan that lost a step ran partially and reported success (fixed)
+
+Found while probing the trigger path from SEC-096: what happens when only *part* of
+a requested plan is refused?
+
+**Was:** `plan_task` dropped refused steps, kept the survivors, and returned
+`pending`, so callers executed a **different plan than the one requested**:
+`[query_events (allowed), contain_asset (not in the automation agent's allowlist)]`
+came back `completed` with `errors: []`, ran only `query_events`, and the playbook's
+detail said "plan: ok". The refused step was recorded nowhere the operator could
+see: `tool_calls` rows were written with `task_id = None` (0) for both agent tasks
+and playbooks — ten such rows in the seeded DB — and the agent-task path never
+audited a partial refusal at all (only a fully-denied plan was).
+
+**Fixed:** `plan_task` now returns the refused steps (`denied_calls`) and callers
+attach them to the row that owns them via `policy.record_denials(conn, id, plan)` —
+so a partial refusal is visible on the run/task it belongs to, not orphaned.
+Non-empty `reasons` now fail the unit closed: the playbook run is created `failed`
+with `{error: "denied", reasons: [...]}` and audited `playbook.failed` with the
+reasons, and an agent task is `denied` and audited `agent.task.denied` with
+`{reasons, partial: true}`. Nothing runs unless the whole plan is admissible.
+
+**Live (after fix):** the same probe → run `denied`, `reasons: ["tool not in agent
+allowlist: contain_asset"]`, read back as `failed {error: denied, reasons: [...]}`,
+no `results` at all; the identical agent-task request → task `denied` with
+`tool_calls: [("contain_asset", 0)]` on that task; `tool_calls` rows with `task_id 0`
+= 0; and a fully-valid playbook still runs → `completed` with both tools.
+
+### SEC-098 — a failing report schedule retried forever and recorded nothing (fixed)
+
+Found by auditing the SEC-071 scheduler's failure path: `except Exception: continue`
+skipped the `next_run_at` advance.
+
+**Was:** a schedule whose build raises kept its overdue `next_run_at`, so the 30 s
+daemon thread retried it on **every tick, forever**. Nothing recorded the failure —
+no audit event, no error on the row, `last_run_at` stayed NULL — and
+`POST /api/reports/schedules/run-due` answered `{"built": 0}`, which is exactly what
+a healthy "nothing was due" pass answers. Live repro: a `cases` schedule with
+`filters = {"status": {"a": 1}}` (accepted at creation, then bound straight into SQL
+by the builder) produced `built=0` on every pass, `last_run_at` NULL, `next_run_at`
+still `2000-01-01`, zero `report.scheduled_failed` audits. The same bad filter on the
+ad-hoc `POST /api/reports` was an unhandled 500.
+
+**Fixed:**
+- `report_schedules` gained `failures` (consecutive) and `last_error` (migration
+  `0006`); a failing build advances `next_run_at` by the interval, records the reason
+  on the row and audits `report.scheduled_failed` with it. A successful run clears
+  both. So a broken schedule retries on its own cadence, visibly, instead of every
+  30 s invisibly.
+- `tick()`/`run-due` return `{"built": n, "failed": [{id, kind, error}]}`, so
+  "nothing due" is no longer indistinguishable from "everything due is broken".
+- Schedule creation (and ad-hoc generation) validates `filters` per kind:
+  unsupported keys and non-string values are `400 bad_filters` instead of being
+  silently ignored (`overview` ignores all filters, so `{"severity": "high"}` on an
+  overview schedule used to look like a filtered report) or exploding at runtime.
+- The Reports SPA table shows a "Last error" column.
+
+**Live (after fix):** all four bad payloads → `400` with the reason; a valid `soc`
+schedule still created; ad-hoc bad filter → `400` not `500`; the broken-runtime
+schedule → `run-due {"built": 0, "failed": [{"id": 2, "error": "OperationalError: no
+such table: alerts"}]}`, row `failures: 1` + `last_error` + `next_run_at` 5 min
+ahead, audit `report.scheduled_failed` target 2, a second pass
+`{"built": 0, "failed": []}`, and after repair `{"built": 1, "failed": []}` with the
+row cleared.
+
+### SEC-099 — deleting one row (the anchor) turned a detected tamper into a pass (fixed)
+
+Found by tamper-testing the SEC-084 audit chain on copies of the demo database:
+edits, mid-log deletions, tail deletions, replenished tails and a regressed anchor
+were all detected — but `DELETE FROM audit_anchor` returned
+`ok: true, reason: "unanchored"`, and so did "delete the newest rows *and* the
+anchor", which is precisely the erasure the anchor exists to detect.
+
+**Was:** `verify_chain` treated a missing anchor as "this log may predate anchoring"
+and answered `ok: true` with a warning. That is honest for a pre-0005 database, but
+the check could not tell that case apart from an anchor that was just deleted, so one
+`DELETE` downgraded a detected truncation into a passing check — the laundering path
+SEC-084 set out to close (its anchor table was hardened against *overwrite* via the
+settings endpoint, not against deletion). Any consumer that reads `ok` — CI, a
+dashboard, an auditor's script — would report the log as intact.
+
+**Fixed:** `verify_chain` now distinguishes the two cases using the migration record,
+which is not part of the log: if `0005_audit_anchor.sql` is applied and the log is
+not empty, a missing anchor is `ok: false, reason: "anchor_missing"` with a detail
+saying why (the anchor is written with every append and removed by nothing else), and
+an anchor exported earlier is still compared on that path. A log that genuinely
+predates anchoring keeps the honest `ok: true, reason: "unanchored"` warning.
+
+**Live (after fix):** healthy log → `ok: true, rows 22, anchor head_seq 22`; after
+deleting history and the anchor → `ok: false, reason: "anchor_missing"` with the
+explanation, and `?head_seq=22&head_hash=…&rows=22` → `external {ok: false, reason:
+"missing"}`. The database was re-seeded afterwards; nothing was tampered in the
+platform's own state.
+
+### SEC-100 — a backup bundle could be edited after creation and still verified (fixed)
+
+Found by auditing what a bundle's manifest can and cannot prove. Everything in it
+travels *inside* the archive, so it can be edited together with the files it
+describes.
+
+**Was:** `verify_bundle` checked the archive against its own manifest, and the
+sha256 that `create_backup` recorded in the hash-chained audit log was consulted by
+nothing. Live repro on the demo database: the bundle's `cybersec.db` was swapped for
+one containing an extra `backdoor` admin, the manifest's checksum for it was
+recomputed, and the result verified `ok: true` — then
+`POST /api/admin/backup/restore` accepted it and the live user list gained the
+account. The edit was undetectable by the platform even though it had recorded the
+original hash.
+
+**Fixed:** `verify_bundle(conn, …)` now compares the archive against the sha256
+recorded in the audit log at creation, matching content-first (a file name is not
+evidence):
+
+| case | result |
+|---|---|
+| untouched | `ok`, `recorded.matched_by: "name"`, hash matches |
+| edited in place (manifest fixed up) | `ok: false`, `"modified: sha256 differs from the hash recorded when this backup was created"` |
+| edited **and renamed** (so nothing recorded matches by name or content) | `ok: true` but `recorded.found: false` with a note — provenance unknown, not proof of tampering |
+| renamed but untouched | `ok`, `recorded.matched_by: "content"` |
+
+`POST /api/admin/backup/restore` passes its connection through, so an edited bundle
+is refused `409 verify_failed`, and a bundle of unknown provenance is refused
+`409 unrecorded_bundle` unless the operator passes `allow_unrecorded: true` — the
+disaster-recovery case (a bundle built elsewhere, or restored onto a rebuilt
+platform) stays possible but is now a deliberate, audited act. A new
+`POST /api/admin/backup/verify` checks any bundle inside the backups directory
+without restoring it, and the Admin SPA gained the matching **Check** action.
+
+**Live (after fix):** untouched bundle → `ok, matched_by name`; edited in place →
+`verify ok: false` naming both hashes, `restore 409 verify_failed`; edited and
+renamed → `restore 409 unrecorded_bundle`; renamed-but-untouched copy →
+`matched_by: content` and restore succeeds; the live user list never gained the
+`backdoor` account.
+
+### SEC-101 — the backup inventory reported zero backups (fixed)
+
+Found while reading the same code path: `create_backup` packs the snapshot into
+`<stamp>.tar.gz` and deletes the intermediate `.db`, but
+`GET /api/admin/retention/report` globbed `*.db` in the backups directory.
+
+**Was:** live, with one bundle on disk, the report answered
+`backups: {"total": 0, "items": []}` — the retention report an operator checks said
+there were no backups at all, and it had no hash or verification state to show even
+when it did list something.
+
+**Fixed:** the inventory lists `*.tar.gz` bundles (tagged `kind: "bundle"`, with
+`sha256`, `matches_recorded` and `verifies` from the SEC-100 check) and any stray
+`.db` files. Live: `total: 1` with the bundle, `matches_recorded: true`,
+`verifies: true`.
+
+### SEC-102 — GRC control evidence was hashed and thrown away (fixed)
+
+Found by checking the sibling of the case-evidence path: case evidence is written to
+the store, verified on download and audited, so what does a *control's* evidence do?
+
+**Was:** `attach_evidence` read the upload, computed its sha256, and stored the row
+with `path = NULL` — the bytes were never written anywhere. A control's "audit
+evidence" was therefore a name, a digest and a timestamp with no artifact behind it,
+and no route existed to download one (so nothing could notice). The demo data made
+the gap explicit: the seeded row claimed `policy-review-2026Q3.md` with the digest
+`"synthetic" * 10`. The module docstring promised "evidence is attached to controls
+with sha256 provenance" while the artifact was discarded. The listing also had no
+notion of a missing artifact, unlike case evidence (`path_exists`).
+
+**Fixed:** uploads are written to the evidence store exactly like case evidence
+(token-prefixed safe name, mode 0600, real path recorded, size in the audit detail);
+`GET /api/grc/evidence/{id}/download` (permission `evidence.download`) refuses a
+missing artifact with `410` and a digest mismatch with `500 integrity_mismatch` after
+auditing `evidence.integrity_failure`, and audits a good download
+`evidence.downloaded` — the same contract case evidence has. The listing reports
+`path_exists`, `storage` (`stored`/`missing`/`not_stored`) and a `missing` count, and
+the seed writes a real review note with its real digest. The GRC SPA links each
+evidence name to its download and marks rows without an artifact.
+
+**Live (after fix):** upload → file on disk with mode 0600, digest matching the
+bytes; listing `stored`, `missing: 0`; download 200 with identical bytes; swapped
+file → `500 integrity_mismatch` + `evidence.integrity_failure` audit; removed file →
+`410 missing` and `missing: 1`; seeded control evidence → `stored`,
+`digest_matches_file True` (was `synthetic…` with no path).
+
+### SEC-103 — a rule could look live while watching a field nothing carries (fixed)
+
+The follow-on from SEC-074. That fix made *non-compiling* rules visible; the
+coverage report then distinguished "broken" from "has not fired yet" — but a rule
+can compile perfectly and still be unable to fire.
+
+**Was:** a term field that no event resolves to (`user_name` where events carry
+`user`) makes `_get_field` return None, so the term is simply false. Live repro: a
+rule created with `detection: {ssh: {user_name: root, action: ssh_failed_login}}`
+reported `compiles: true, never_fired: true` and was listed under `gaps` — the same
+bucket as a rule that legitimately has not seen traffic — with nothing anywhere
+saying the field does not exist. An operator would add "coverage" for a rule that
+can never match, and a typo would survive review indefinitely.
+
+**Fixed:** `observed_event_fields()` derives the field universe actually ingested
+(columns plus nested `data.*` paths, sampled from the newest 2000 events) and
+`unmatchable_fields(spec, observed)` reports term fields the events never carry.
+`GET /rules` gains per-rule `unmatched_fields` plus `summary.unmatched_field_uids`;
+`GET /rules/coverage` gains `misconfigured_rules`, `observed_event_fields` and
+`watching_unknown_fields`, and such rules are listed there instead of in `gaps` —
+"fix the field name" and "add coverage" are different actions. The SOC SPA shows a
+`misconfigured` badge per rule and a warning block in the coverage panel.
+
+**Live (after fix):** the typo'd rule → `unmatched_fields: ["user_name"]`,
+`summary.unmatched_field_uids: ["T-9999"]`, `misconfigured_rules: 1`, absent from
+`gaps`; no false positives — all six shipped rules `unmatched_fields: []` and a rule
+on `data.bytes_out`/bare `bytes_out` (carried by an ingested event) is unflagged.
+
+### SEC-104 — STIX imports bypassed the validation the manual path applies (fixed)
+
+Found by comparing the two ways into `threat_indicators`: the manual endpoint bounds
+`confidence` with `ge=0, le=100`, so what does the bundle importer do with the same
+field?
+
+**Was:** nothing — bundle values went straight into the store. Live repro on the demo
+database: `confidence: 999` was stored as 999 and `confidence: "high"` was stored as
+**text**, after which `ORDER BY confidence DESC` ranked the string above every real
+score (`['high', 999, 85, …]`), so a bogus value became the "most confident" indicator
+in the listing and in correlation ordering. Separately, a spec-valid STIX timestamp
+with milliseconds (`2027-09-01T00:00:00.000Z`) was stored verbatim; the store's
+parsers read whole seconds, so `_stix_window` could not read it and the indicator got
+`ttl_hours: None` — the bundle's explicit `valid_until` silently became "never
+expires", and `first_seen` violated the column's documented format.
+
+**Fixed:** `parse_bundle` validates and normalises before anything is written, naming
+the offending object: `confidence` must be an integer 0-100 (booleans excluded), and
+`valid_from`/`valid_until` must be RFC3339 — fractional seconds and offsets are
+accepted and normalised to `%Y-%m-%dT%H:%M:%SZ` in UTC. A bad value is `400 bad_stix`
+with the reason, and because parsing happens before any DB write nothing is partially
+imported. Objects whose pattern this subset does not support are still ignored rather
+than judged (their timestamps are irrelevant), and an absent `confidence` still falls
+back to `default_confidence`.
+
+**Live (after fix):** `"high"` → `400 indicator 0: confidence must be an integer
+0-100, got 'high'`; `999` → same; the fractional-time bundle → `first_seen
+2026-09-01T00:00:00Z`, `ttl_hours 8760`, `active`; `"next tuesday"` → `400 indicator 0
+valid_until: not an RFC3339 timestamp`; confidence ordering all integers; a `mutex`
+object with nonsense confidence → ignored, `created: 0`.
+
+### SEC-105 — two Prometheus series that could not tell the truth (fixed)
+
+Found by reading what each metric family actually asks the database, rather than what
+its name says.
+
+**Was (a):** `cybersec_alerts_open{severity="…"}` counted **every** alert of that
+severity — the status filter existed only on the unlabelled total. Live repro: closing
+a high alert dropped `cybersec_alerts_open` 6 → 5 while
+`cybersec_alerts_open{severity="high"}` stayed at 4. Any alerting rule written against
+the labelled series (the natural way to page on "open criticals") could therefore
+never clear, which is worse than no alert: it trains operators to ignore it.
+
+**Was (b):** `cybersec_sessions_active` was `SELECT COUNT(*) FROM sessions`, and rows
+are only deleted on logout. Live repro: with every session forced to
+`expires_at 2000-01-01`, the metric still reported 2 active sessions.
+
+**Fixed:** one shared definition of "open" (`_OPEN_ALERT_STATUSES`, next to the
+metrics so the total and the per-severity series cannot drift), used by both the total
+and the labelled series; the labelled totals are still available under their own
+honest name `cybersec_alerts_total{severity="…"}`. `cybersec_sessions_active` counts
+sessions whose `expires_at` has not passed, and the un-pruned stale rows are exposed as
+`cybersec_sessions_expired` instead of being hidden inside "active".
+
+**Live (after fix):** closing the high alert → `alerts_open` 6 → 5 **and**
+`{severity="high"}` 4 → 3, with `alerts_total{severity="high"}` holding at 4; the
+labelled open series now sum exactly to the open total (5 == 5). Expired sessions →
+active 0, expired 1; a fresh login → active 1.
+
+Follow-on in the same change: the stale rows were only ever removed when their token
+was presented again, so the table grew without bound. Logging in now drops that user's
+expired sessions (a moment nobody has to notice, and the only writer of them).
+
+### SEC-106 — a scan run's own counters described the last import, not the run (fixed)
+
+Found by reading what the AppSec SARIF import writes back to its `scan_runs` row.
+
+**Was (a):** `UPDATE scan_runs SET findings_total = ?` used the number of findings
+*created by that call*. Live repro: import → `findings_total: 2`; import the same file
+again (idempotent — it creates nothing) → `findings_total: 0` while both findings were
+still attached to the run. `findings_new` was written once, as `0`, and never updated,
+so it was permanently meaningless.
+
+**Was (b):** the same statement set `status = 'completed'` unconditionally, so a run the
+CI reported as `failed` became `completed` the moment results were uploaded — the
+platform rewriting the run's own lifecycle state.
+
+**Fixed:** after the import, `findings_total` is the run's actual attached count and
+`findings_new` is what this import added; the response carries both plus the run id. A
+run whose reported status is `failed`/`cancelled` keeps it (with a `note` saying why),
+while a `running` run still advances to `completed`; the audit detail now records
+`new_findings`, `findings_total` and the resulting status. The AppSec SPA shows a
+Findings column (`total (+new)`).
+
+**Live (after fix):** import 1 → `{imported: 2, findings_total: 2, findings_new: 2}` and
+the row agrees; import 2 → `{imported: 0, findings_total: 2, findings_new: 0}` with the
+findings list also reporting 2; a `failed` run stays `failed` with its findings recorded
+(`note: "run stays 'failed': importing results does not rewrite a status the caller
+reported"`), and a `running` run advances to `completed`.
+
+### SEC-107 — the authorization scope could be rewritten in silence (fixed)
+
+Found by re-reading the write path of the object the tradecraft scope guard trusts.
+`exercises.targets` is what authorizes work on a target; `PATCH /api/exercises/{id}`
+could replace it — plus the owner and the whole authorization window — and the audit
+entry said nothing had happened.
+
+**Was (three parts, all live-reproduced):**
+1. The audit detail was literally `{"status": body.status, "reason": body.reason}`, so a
+   request that changed only `targets`/`owner`/`starts_at`/`ends_at` wrote
+   `exercise.updated {"reason": null, "status": null}` — no record of who widened an
+   authorization or when.
+2. The write path returned the raw row while `GET` decoded it (the SEC-091 class):
+   `PATCH` answered `targets` as a JSON **string** (`"[\"test1@test.local\", …]"`) where
+   `GET` answered an array, which breaks the SPA (`.map`/`.join` on a string).
+3. `starts_at`/`ends_at` were never validated, and `_window_state` compares their first
+   ten characters as *strings* — so `ends_at: "banana"` sorted after today and the
+   engagement read as having a live window: an authorization that never lapses, from a
+   typo.
+
+**Fixed:**
+- Windows are validated where they are written: `starts_at`/`ends_at` must parse as
+  `YYYY-MM-DD` (a full timestamp's date part is accepted), and `ends_at` must not
+  precede `starts_at` → `400 bad_window` naming the field.
+- `_window_state` treats an unreadable stored date as `invalid` — **not in force**
+  (deny by default), since an unreadable window cannot bound an authorization — and
+  `authorized_targets` marks such entries unusable with the reason, listing them under
+  `ignored_entries` rather than `authorized`.
+- An update that touches `targets`/`owner`/`starts_at`/`ends_at` is audited as
+  `exercise.scope_changed` with `changed` and per-field `before_after` values;
+  other changes still write `exercise.updated` but now name the fields.
+- A **closed** engagement (`completed`/`aborted`) refuses scope/owner/window changes
+  with `409 terminal_exercise` and audits `exercise.scope_change_denied` — the scope a
+  recorded outcome rests on is not editable afterwards.
+- Both `create` and `update` responses decode `targets`/`meta`, like `GET` does.
+
+**Live (after fix):** `PATCH` returns `targets` as a list; the audit entry is
+`exercise.scope_changed {"changed": ["owner","targets"], "before_after": {...}}`;
+`ends_at: "banana"`, `2026-13-45` and an inverted window each → `400 bad_window` with
+the reason; a completed engagement → `409 terminal_exercise` with the refusal audited;
+and a stored unreadable window → `ignored_entries` entry `window_state: "invalid"`,
+`usable: false`, with `check_target` answering `in_scope: false` and naming the cause.
+
+### SEC-108 — an oversized number was an opaque 500 (fixed)
+
+Found by fuzzing every query parameter of every GET route in `/api/openapi.json`
+with boundary values (`""`, `abc`, `-1`, `999999`, `1e309`, `NaN`, `null`, `true`,
+`2026-13-45`, a 30-digit integer). Of 1,020 requests, 20 distinct ones answered
+**500 `internal_error`**:
+
+```
+GET /api/soc/alerts?page=999999999999999999999999999999       500
+GET /api/agents/tasks?agent_id=999…                           500
+GET /api/appsec/findings?scan_run_id=999…   /api/automation/runs?playbook_id=…
+/api/cloud/posture?asset_id=…   /api/vulns?asset_id=…          500   (+ 14 more)
+```
+
+**Was:** a query parameter is validated as a Python `int`, but Python ints are
+unbounded while SQLite's are 64-bit, so `sqlite3` raised
+`OverflowError: Python int too large to convert to SQLite INTEGER` from
+`db.paged`/`db.q` and the catch-all handler converted it into an opaque 500. Two
+different defects underneath one symptom: pagination, where the value is only ever
+a LIMIT/OFFSET, and filters that reach SQLite as a bound parameter.
+
+**Fixed:**
+- `db.paged` clamps `page`/`page_size` (`MAX_PAGE` 10,000,000, `MAX_PAGE_SIZE` 1000)
+  so every list endpoint is safe by construction: an absurd page is served as the
+  last page (empty `items`, real `total`, and the response reports the `page` it
+  served rather than pretending to serve page 10^29).
+- The app installs an `OverflowError` handler ahead of the catch-all, which answers
+  **422 `value_out_of_range`** — the documented `{code, message}` shape, stating the
+  bound (`|value| <= 9223372036854775807`) — for oversized numbers in filters. That
+  covers every current and future endpoint that binds a validated int straight into
+  SQL.
+
+**Live (after fix):** the same 1,020-request sweep answers **0 5xx**;
+`?page=999…` → `200 {items: [], total: 6, page: 10000000}` on alerts, assets, audit
+and GRC controls; `?agent_id=`/`?asset_id=`/`?scan_run_id=`/`?playbook_id=` oversized
+→ `422 value_out_of_range` naming the range.
+
+### SEC-109 — a write that violated a database constraint answered an opaque 500 (fixed)
+
+Found by extending the fuzzing to request bodies: for every POST/PATCH/PUT route the
+schema-driven fuzzer synthesized a body from `/api/openapi.json`, repaired it against
+the `422` field errors until the API accepted it, then replaced every writable field
+with boundary values (`null`, `""`, `abc`, `0`, `-1`, `9…`, `["x"]`, `{"a":1}`,
+`"2026-13-45"`, SQL/HTML payloads). Three live 500s:
+
+```
+PATCH /api/intel/indicators/1 {"value": null}   500  NOT NULL constraint failed: threat_indicators.value
+PATCH /api/cloud/posture/1   {"title": null}    500  NOT NULL constraint failed: posture_findings.title
+POST  /api/vulns             {"asset_id": "0"}  500  FOREIGN KEY constraint failed
+```
+
+**Was:** two shapes of the same defect. (1) `title`/`value`/`type` are NOT NULL
+columns but their models allow `null` — a pydantic model cannot tell "not sent" from
+"sent as null", and the routes write any non-None… except null, which passed the
+`provided` check and reached the `UPDATE`. (2) `_insert_finding` validated the asset
+with `if asset and not db.one(…)`: a **falsy** id (0) skipped the existence check and
+went into the INSERT, where the foreign key failed. The same falsy trap sat on
+`source_id` in two intel paths.
+
+**Fixed:**
+- The specific holes: an explicit null for a NOT NULL field is refused with
+  `400 missing_field` naming it (`title` on cloud posture, `type`/`value` on
+  indicators — `type` is caught by the enum check first, which is equally clean); the
+  falsy-id traps now read `is not None`, so `asset_id: 0` and `source_id: 0` are
+  `400 bad_asset`/`bad_source` instead of a foreign-key 500.
+- A net behind them: `sqlite3.IntegrityError` is translated — `NOT NULL` →
+  `400 missing_field`, `FOREIGN KEY` → `400 bad_reference`, `UNIQUE` → `409 duplicate`,
+  `CHECK` → `400 constraint_violation` — with the offending column names under
+  `fields[]` (table prefixes stripped) and no SQL echoed. Any write path that still
+  reaches the database with a bad constraint answers the documented envelope.
+
+**Live (after fix):** `value: null` → `400 missing_field "value must not be null."`;
+`type: null` → `400 bad_type` (the enum check fires first); `title: null` →
+`400 missing_field`; `asset_id: 0`, `asset_id: "0"` and `asset_id: 9999` →
+`400 bad_asset`; `source_id: 0` → `400 bad_source`; the indicator row is unchanged
+after the refused writes.
+
+### SEC-110 — a case's triage fields were free text (fixed)
+
+Found by the body fuzzer's "accepted garbage" pass: it reports every mutation the API
+*accepted*, and `PATCH /api/cases/1 {"priority": "banana"}` came back 200. Live
+pre-fix: `priority`, `severity` and `assigned_to` were all stored unvalidated on
+update, `severity` was never validated anywhere, and the two checks that existed used
+a truthiness test — `create`'s priority check and `update`'s status check both read
+`if body.x and …`, so `""` (falsy) skipped them, and `{"status": ""}` stored a case
+with no status, which then appeared as its own bucket in every `GROUP BY status`.
+
+**Fixed:**
+- One shared `_validate_triage` for create **and** update: `priority` ∈
+  `{low, medium, high, critical}` and `severity` ∈ the standard five
+  `{critical, high, medium, low, info}` — exactly the values the SPA's New-case form
+  offers and the sets alerts and vulns already enforce (SEC-079/082), returning
+  `400 bad_priority` / `400 bad_severity` with `allowed[]`. `None` still means "not
+  provided" (severity is optional; the SPA sends `undefined` for its blank option).
+- `status` and the triage checks now test `is not None`, so an empty string is a
+  `400 bad_status`/`bad_priority`/`bad_severity` naming the allowed values instead of
+  a stored row nobody counts.
+- `PATCH /api/cases/tasks/{id}` took a **raw `dict`** and wrote any of its keys, so the
+  create-side bounds did not apply and the endpoint had no schema in the OpenAPI
+  document; it now takes a `TaskUpdate` model (status enum + `assigned_to` ≤100,
+  `due` ≤40). The audit entry is built from the same model.
+
+**Live (after fix):** `priority: "banana"`, `severity: "banana"`, `status: ""`,
+`priority: ""` and `severity: "banana"` on create all → `400` with `allowed[]` naming
+the set; a valid `{priority: "critical", severity: "info"}` update → 200; the refused
+writes leave the case's stored triage unchanged; a task PATCH with a bad status →
+`400 bad_status`, a 101-character `assigned_to` → `422`, and a valid reassignment →
+200.
+
+### SEC-111 — a field could never be cleared (fixed)
+
+Found while checking the SPA's own PATCH bodies against the routes they call:
+`Soc.tsx` clears an alert's assignee by sending `{"assigned_to": null}`, and every
+PATCH route treats `None` as *"not sent"*, so the field was skipped, the diff came out
+empty and the analyst got `400 no_changes` — the unassign silently did not happen.
+
+**Was:** "only the fields the caller actually sent are written" (SEC-088) was
+implemented as `if value is not None`, which cannot tell *omitted* from *sent as null*.
+A nullable field therefore had no clear path at all: the SPA's null was refused, and
+the alternative — `{"assigned_to": ""}` — **worked** but stored an empty string where
+"never assigned" is `NULL` everywhere else (`SELECT quote(assigned_to)` on the seeded
+alert: `NULL`, after the empty-string clear: `''`), so the two representations of "no
+assignee" drifted apart.
+
+**Fixed** (the two routes whose whole update mechanism is that loop, alerts and cases):
+a field the caller **sent** is written, including an explicit `null`, which clears a
+nullable column (JSON Merge Patch, RFC 7396); an omitted field is untouched; an empty
+body is still `400 no_changes`; a sent `null` for a `NOT NULL` column is
+`400 missing_field` naming it. The audit entry is built from the sent fields, so a
+clear is recorded as `{"assigned_to": null}` instead of vanishing from the entry.
+
+**Live (after fix):** assign then clear → `200`, column back to `NULL` (not `''`), audit
+`alert.updated {"assigned_to": null}`; `{"status": null}` → `400 missing_field`;
+`{}` → `400 no_changes`; dismissing with `notes: null` still → `400 note_required`;
+on cases `{"assigned_to": null}`/`{"severity": null}` clear while an omitted `priority`
+is kept, `{"title": null}` → `400 missing_field`, and the audit rows read
+`{"assigned_to": null}` / `{"severity": null}`.
+
+**Follow-up (recorded, not done):** `PATCH /api/intel/indicators/{id}`,
+`/api/cloud/posture/{id}` and `/api/exercises/{id}` still read `None` as "not sent", so
+the same clear-path gap remains there; each needs the same `model_fields_set` switch
+plus the JSON-column case (`db.jdump(None)` writes the *text* `"null"`, so a nullable
+JSON column needs an explicit `None`).
+
+### SEC-112 — a retention typo made evidence never come due (fixed)
+
+Found by checking the *consumers* of a free-text field: `POST /cases/{id}/evidence`
+stored `retention` as-is (`Form(None)`, never validated), while
+`/api/admin/retention/report` understands exactly two things — the window grammar
+`<n><d|w|m|y>` and the sentinels `legal-hold`/`legal_hold`/`retain-case-close`/
+`indefinite` — and `_retention_due` returns `None` for anything else, which the report
+then counted as **`within_retention`**.
+
+**Was:** `retention: "banana"` (or `"90 days"`, `"ninety"`) was accepted on upload, the
+artefact never came due for review, and the one report an operator checks for evidence
+governance said it was fine. A typo defeated the control silently — the SEC-107 shape
+(an unreadable value must not be read as "in force"), in the evidence domain.
+
+**Fixed:**
+- Upload validates and normalises the label: `<n><d|w|m|y>` (case- and
+  whitespace-insensitive, stored canonical — `6M` → `6m`) or a sentinel
+  (`legal_hold` stays), anything else is `400 bad_retention` with the accepted forms in
+  `allowed[]`; an empty value becomes `null` rather than `""`. The audit entry records
+  the stored label.
+- The report no longer blesses what it cannot parse: unrecognised labels are listed
+  under `unrecognised_retention` with an `unrecognised_count` and are excluded from
+  `within_retention`, so rows already stored (or seeded) with a bad label surface in
+  the report instead of hiding there.
+
+**Live (after fix):** `banana`, `90 days`, `ninety`, `999999d` → `400 bad_retention`
+naming the accepted forms; `6M` → stored `6m`, `legal_hold` → stored `legal_hold`,
+`30d` → stored `30d`, with the label in the `evidence.uploaded` audit detail; a
+legacy `banana` row appears under `unrecognised_retention` (`unrecognised_count: 1`)
+and is **not** in `within_retention` or `due_for_review`.
+
+### SEC-113 — a scan run's kind and status were free text (fixed)
+
+Found by checking which string fields the rest of the platform keys off. `POST
+/api/appsec/scan-runs` stored `kind` and `status` exactly as sent, while (a) the SPA
+offers exactly four kinds, (b) `POST /api/appsec/sarif` decides whether to advance a
+run by comparing `status` to the literals `failed`/`cancelled` (SEC-106), and (c)
+`GET /api/appsec/scan-runs` orders by `COALESCE(finished_at, started_at) DESC` on the
+stored *text*.
+
+**Was:** a run registered as `status: "Failed"`/`"fialed"` was silently advanced to
+`completed` by the next import — the exact behaviour SEC-106 removed, re-entering
+through a typo — and any count of failures missed it; `kind: "banana"` belonged to no
+view; and `started_at: "banana"` sorted after every real date, pinning that run to the
+top of the list forever (the SEC-107 shape again: an unreadable value read as
+authoritative).
+
+**Fixed:**
+- `kind` ∈ `{sast, dependency, secret_scan, container}` (the SPA's set) → `400 bad_kind`
+  with `allowed[]`; `status` ∈ `{running, completed, failed, cancelled}` → `400
+  bad_status` with `allowed[]`.
+- `started_at`/`finished_at` must parse as an ISO date (a full timestamp is accepted)
+  and may not be blank → `400 bad_timestamp`.
+- The SARIF import response now **always** reports the run's status after the import
+  (`status` was absent exactly when the import advanced the run) with a `note` saying
+  whether it was kept or advanced, so no client has to guess or re-read the run.
+
+**Live (after fix):** `banana`/`SAST`/`sast ` → `400 bad_kind` with the four allowed;
+`Failed`/`fialed`/`done` → `400 bad_status`; `started_at: "banana"` and
+`finished_at: "2026-13-45"` → `400 bad_timestamp`; a valid `dependency`/`running` run
+→ 201, import → `{..., "status": "completed", "note": "run advanced from 'running' to
+'completed'"}`; a `failed` run → `{..., "status": "failed", "note": "run stays
+'failed': …"}`.
+
+### SEC-114 → SEC-117 — completion review: what the build was missing
+
+A full inventory pass against the plan's own acceptance criteria (`planning/plan.md`,
+`planning/acceptance-criteria.md`, `agents/MASTER_BUILD_PROMPT.md`) rather than against
+a bug report. Four gaps were found and closed; one tool was added.
+
+#### SEC-114 — the demo database did not exercise six of the platform's own features
+
+`seed_demo` produced alerts, cases, intel, vulns, AppSec, cloud, GRC, exercises and
+agents, and then stopped: `reports` (0), `report_schedules` (0), `exploitability_reviews`
+(0), `attack_chains` (0), `releases` (0) and `saved_searches` (0) were all empty. Those
+pages rendered "nothing here" on a fresh install, the smoke check could only 404 their
+read paths, and the tradecraft/GRC screenshots in the docs described features the demo
+never showed.
+
+**Fixed:** `seed_lab_extras(conn)` runs after detection and the demo case (the reports
+read the alerts those steps produce) and is idempotent per section. It creates two real
+report artefacts through `ReportBuilder` (provenance, input counts and snapshot hash
+included), two schedules (one active, one paused with a `last_run_at`), an
+exploitability review against an in-scope lab target, a two-step validated attack chain,
+a saved searches pair, a release decision record whose `checklist_sha256` is the real
+hash of `docs/14-release-checklist.md`, and the range registration below. Verified:
+`/api/reports` answers 2 artefacts, `/api/reports/schedules` 2 rows, `/api/tradecraft/chains`
+1, `/api/tradecraft/reviews` 1, `/api/admin/releases` 1.
+
+#### SEC-115 — the lab had no range: nothing recorded which targets exist
+
+The platform's exercises authorize *targets*, and the tradecraft scope guard refuses
+work outside them — but no table recorded which targets the lab actually runs. The demo
+seed proved the gap: exercise 2 was authorized against `lab-ctf-target-01`, a hostname no
+container ever served. Nothing could tell **"authorized but not up"** (a session that
+will fail) from **"up but not authorized"** (scope drift, the dangerous one).
+
+**Added:**
+- `lab_targets` (migration 0007) — name, kind, endpoint, image/profile, exposure,
+  status, purpose — plus `/api/lab/targets` (list/register/patch) with `lab.read` for
+  every role and `lab.write` for ir_lead/admin. Endpoints are validated as *interior* to
+  the lab: no scheme, no path, no loopback, no public names → `400 bad_endpoint`. A
+  target an active exercise still authorizes cannot be retired (`409 target_in_use`,
+  naming the holder).
+- `/api/lab/coverage` — the cross-check: `authorized_but_not_running`,
+  `running_but_not_authorized`, `authorizations_with_no_target`, plus
+  `other_authorized_targets` (mailboxes, vendor hosts — legitimate, informational) and an
+  `ok` verdict (`ok` is false only for the two contradictions — a target running with no
+  authorization, or an authorization naming an unregistered range target — because a
+  stopped range between sessions is normal). Deliberately narrow: only names that read like range targets
+  (`lab-*`, `*.lab`, `host:port`) count as dangling, because a check that cries wolf is
+  one somebody turns off.
+- A **Lab range** SPA page (nav: Assurance) showing the registry, the four verdict
+  counters, per-target scope and the cross-checks.
+- `infra/lab/docker-compose.yml` — the range itself: Juice Shop, a DVWA-style CTF target
+  and `lab-api-01`, all on an `internal: true` network, ports published to `127.0.0.1`
+  only, with compose profiles (`juice`/`ctf`/`api`). `infra/lab/api/labapi.py` is our own
+  intentionally vulnerable API (IDOR, unauthorised admin route, debug env dump) so the
+  range needs no third-party image.
+- The seed now registers three targets and authorizes the CTF exercise with an explicit
+  window over them, so the demo data is *in scope* rather than merely typed in.
+
+**Live:** `/api/lab/targets` 3 rows; bad endpoints (`https://evil.example/`,
+`127.0.0.1:3000`, `juice.example.com:3000`) all → `400 bad_endpoint`; `/api/lab/coverage`
+reports the seeded targets `in_scope: true` with their authorizing exercise, the seeded
+phish-drill mailboxes under `other_authorized_targets` (not an error), and `ok: true`.
+
+#### SEC-116 — "is this install healthy?" needed six different pages
+
+Migrations, the audit chain, scheduler failures, backup freshness, directory
+permissions, the environment guards and the range cross-check each had their own page or
+endpoint. `GET /api/admin/doctor` (admin `audit.read`) aggregates eleven checks into one
+verdict (`ok`/`warn`/`fail`), each with the values behind it and a `fix_hint` naming the
+action; it is read-only by construction (never writes, retries or repairs) and always
+answers. The Admin page's new default tab renders it. Verified in-suite and against a
+seeded install: `verdict: fail` with `backup.freshness: fail` + hint on a fresh database
+(no backup yet), `audit.chain: ok`, `database.migrations: ok (7 applied, 0 pending)`.
+
+#### SEC-117 — the hardening headers existed only at the edge
+
+`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and HSTS lived in the
+Caddyfile, so any deployment without that edge — a hand-started uvicorn, an internal
+operator host, a staging stack behind someone else's proxy — served the SPA with no
+framing, MIME-sniffing or referrer policy. They are now set in the application
+(`setdefault`, so the edge can still override), with a tight CSP
+(`default-src 'self'`; `style-src 'self' 'unsafe-inline'` for the bundled component
+styles; `frame-ancestors 'none'`) and `Permissions-Policy`. HSTS is sent only when the
+request arrived over TLS, because pinning a browser to `https` for a loopback preview
+host would break the local lab.
+
+#### New tool — `scripts/acceptance_check.py`
+
+`pytest` proves behaviour and `smoke_check.py` proves the live surface; neither answers
+*the release clauses*. `planning/acceptance-criteria.md` has twelve of them, and until now
+each was answered by reading a document and remembering. The new script answers each with
+a command, printing `pass` (with the values behind it), `host-ops` (with the exact command
+to run on the target host — the sandbox cannot apply nftables or deploy to a clean target)
+or `fail`, and exiting non-zero only for `fail`. It also records the tested database's
+sha256 and row counts, so a release decision names the exact dataset the report describes.
+
+Against the seeded install: **10 demonstrated · 2 host-ops · 0 failed** —
+env/version recorded (LOCAL, 1.0.0, last release v1.0.0 with the checklist hash), core
+flows (12 probes, all 200 with rows), RBAC (anonymous 401, viewer 403 on the
+consequential writes), integrations (4 rows with health/provenance, probes recorded),
+synthetic events (a second detection pass over 342 events creates 0 duplicate alerts),
+agent governance (4 agents with tool allowlists, approvals + eval endpoints), secrets
+(CI gitleaks over full history), backup + restore (bundle created and verified, doctor's
+`backup.freshness` ok), docs match implementation (18 docs, all linked), risks accepted
+(risk register present; the approved release names the decision maker and the checklist
+hash it was approved against). The two `host-ops` clauses are the isolation matrix and
+the clean-target deploy/rollback, each printed with the command that discharges it.
+
+#### New tool — `scripts/smoke_check.py`
+
+An operator/CI smoke check that walks the *live* OpenAPI surface: it fills every path
+parameter from real rows, then asserts every read route answers 2xx for an admin, every
+route answers 401 unauthenticated, a fixed list of fourteen consequential writes answers
+403 for a viewer, and no write route 5xx's or 401's for an authenticated viewer. It skips
+only the documented public routes (`/api/healthz`, `/metrics`, the API docs) and prints
+the unresolved-id 404s as notes instead of failures. Against the seeded install:
+**214 checks, 0 failures** (`SMOKE OK`), with the surface reported as 102 paths / 136
+operations. Path parameters are filled from real rows (so the happy path is exercised
+rather than a 404), and the two parameters the checker legitimately cannot resolve —
+a per-user resource the admin owns none of — are reported with the reason instead of
+as a dataset gap. Usage: `python -m scripts.smoke_check [--base-url …] [--json]`.
+
+#### SEC-119 — one entry point, and a README that had drifted
+
+Every routine action was a shell incantation spread across documents, and the README's
+own status line had drifted (110/110 tests, two migrations, four CI jobs — the repo has
+305, seven and five). Added a `Makefile`: `make lab` is venv + pinned deps + SPA build +
+seeded database, then `make run` serves it; `make test`/`lint`/`rules`/`smoke`/`accept`/
+`doctor`/`backup-drill`/`loadtest`/`lab-up`/`lab-down`/`lab-status`/`clean` cover the rest,
+and `reseed-reset` is the only destructive target and prompts first. `make doctor` needed
+a real command, so `scripts/doctor_report.py` reads `/api/admin/doctor` and exits
+0/1/2 on ok/warn/fail (`make doctor` → `verdict: OK (11 ok, 0 warn, 0 fail)`).
+
+The claim that `make seed` was safe on an existing database was tested rather than
+asserted: it refuses with `{"skipped": true, "reason": "users already exist (database not
+fresh)"}` and the row counts are unchanged, so the target's help text now says exactly
+that. README status, migrations, script/test inventories, doc index and CI description
+corrected to what the repo actually is; `docs/08` gained the short path.

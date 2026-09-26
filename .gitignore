@@ -1,0 +1,44 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+# ...but committed templates for each environment are fine (SEC-073):
+# infra/prod/.env.example.prod, infra/staging/.env.example
+!.env.example.*
+*.pem
+*.key
+secrets/
+
+# Runtime data (local-first, synthetic by default). The default is
+# app/backend/data/; /data/ covers a DATA_DIR override to the repo root, which
+# would otherwise leave the live database (audit log, evidence, backups) as an
+# untracked file one `git add -A` away from being committed.
+app/backend/data/
+/data/
+backups/
+evidence-private/
+audit-private/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+
+# OS
+.DS_Store
+
+# Generated test data + tsc incremental info
+app/backend/tests/.testdata/
+*.tsbuildinfo
+
+# Backup drill: "lost" data sets moved aside during restore rehearsals (SEC-063)
+app/backend/data.lost-*/

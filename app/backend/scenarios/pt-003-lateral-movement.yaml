@@ -1,0 +1,13 @@
+# Purple-team scenario — lateral movement (validates rule cs-0005)
+# Rule cs-0005: auth_success with data.method in [smb, psexec, wmi]
+# OR rdp_login success (MITRE T1021). No threshold — fires on first match.
+uid: pt-003
+name: Lateral Movement
+description: >
+  SMB + PsExec authentications followed by an RDP login from a workstation
+  to a database host (MITRE T1021). Expect rule cs-0005 to fire immediately.
+expected_rule: cs-0005
+events:
+  - {offset: 0,  host: pt-db-01, user: svc-patch, action: auth_success, outcome: success, severity: medium, source_name: smbd, msg: "smb login accepted", data: {method: smb, src_ip: "192.0.2.14"}}
+  - {offset: 15, host: pt-db-01, user: svc-patch, action: auth_success, outcome: success, severity: medium, source_name: smbd, msg: "psexec session established", data: {method: psexec, src_ip: "192.0.2.14"}}
+  - {offset: 40, host: pt-db-01, user: operator,  action: rdp_login, outcome: success, severity: medium, source_name: winrm, msg: "rdp connection accepted", data: {src_ip: "192.0.2.14"}}
