@@ -172,3 +172,35 @@ def test_case_triage_fields_are_not_free_text(client, seeded):
     r = client.patch(f"/api/cases/{cid}", json={"priority": "critical", "severity": "info"})
     assert r.status_code == 200, r.text
     assert r.json()["priority"] == "critical" and r.json()["severity"] == "info"
+
+
+def test_a_case_field_can_be_cleared_and_notes_only_still_works(client, seeded):
+    """SEC-111: `None` was treated as "not sent" for every field, so a case's nullable
+    triage fields could never be *cleared* — `{description: null}` answered 400
+    `no_changes`, and there was no way to unassign or to drop an over-set severity.
+    A field the caller sends is now written, including an explicit null (RFC 7396
+    merge-patch); omitted fields are untouched; a sent null for a NOT NULL column is
+    refused by name."""
+    r = client.post("/api/cases", json={"title": "Clearable case", "priority": "high",
+                                        "severity": "critical", "assigned_to": "iris",
+                                        "description": "synthetic"})
+    assert r.status_code == 201
+    cid = r.json()["id"]
+
+    r = client.patch(f"/api/cases/{cid}", json={"assigned_to": None, "severity": None,
+                                                "description": None})
+    assert r.status_code == 200, r.text
+    after = r.json()
+    assert after["assigned_to"] is None and after["severity"] is None and after["description"] is None
+    assert after["priority"] == "high"  # omitted -> untouched
+    assert client.get(f"/api/cases/{cid}").json()["assigned_to"] is None
+
+    # NOT NULL columns refuse a sent null (SEC-109's class) by name...
+    for field in ("title", "status"):
+        r = client.patch(f"/api/cases/{cid}", json={field: None})
+        assert r.status_code == 400, f"{field}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] == "missing_field"
+
+    # ...an empty body is still 400 no_changes, and a note-only body is a real change.
+    assert client.patch(f"/api/cases/{cid}", json={}).status_code == 400
+    assert client.patch(f"/api/cases/{cid}", json={"notes": "note only"}).status_code == 200

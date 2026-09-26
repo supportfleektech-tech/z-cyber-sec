@@ -290,6 +290,13 @@ def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
 _UNIT_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
 
 
+def _retention_understood(retention: str | None) -> bool:
+    """True when the label is one the report can act on (SEC-112)."""
+    label = (retention or "").strip().lower()
+    return label in ("legal-hold", "legal_hold", "retain-case-close", "indefinite") or \
+        bool(re.fullmatch(r"\d+\s*[dwmy]", label))
+
+
 def _retention_due(retention: str | None, created_at: str, now: str) -> str | None:
     """Return 'due' if the label's window has elapsed; None otherwise.
     legal-hold / retain-case-close are never auto-due."""
@@ -313,7 +320,7 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
                      user: dict = Depends(require("audit.read"))):
     now = db.utcnow()
     ev = db.q(conn, "SELECT id, name, sha256, size, classification, retention, created_at, case_id FROM evidence")
-    due, pinned, case_bound, ok = [], 0, 0, 0
+    due, unrecognised, pinned, case_bound, ok = [], [], 0, 0, 0
     for e in ev:
         label = (e["retention"] or "").strip().lower()
         if label in ("legal-hold", "legal_hold"):
@@ -325,6 +332,13 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
         if _retention_due(e["retention"], e["created_at"], now) == "due":
             due.append({"id": e["id"], "name": e["name"], "retention": e["retention"],
                         "created_at": e["created_at"], "sha256": e["sha256"][:16]})
+        elif label and not _retention_understood(e["retention"]):
+            # SEC-112: a label the report cannot parse is *not* evidence of being
+            # within retention — it used to be counted as `within_retention`, so a
+            # typo made an artefact never come due while the report blessed it.
+            # Writes are validated now (cases.py); this surfaces rows already stored.
+            unrecognised.append({"id": e["id"], "name": e["name"], "retention": e["retention"],
+                                 "created_at": e["created_at"]})
         else:
             ok += 1
     backups_dir = settings.backups_dir
@@ -352,6 +366,7 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
         "evidence": {
             "total": len(ev), "due_for_review": due, "due_count": len(due),
             "legal_hold": pinned, "case_bound": case_bound, "within_retention": ok,
+            "unrecognised_retention": unrecognised, "unrecognised_count": len(unrecognised),
             "note": "Report only (ADR-005). Deletion is a human, audited operation.",
         },
         "backups": {"total": len(backups), "items": backups},

@@ -142,6 +142,44 @@ def test_retention_report_flags_due_items(client, conn):
     assert isinstance(rep["backups"]["total"], int)
 
 
+def test_unreadable_retention_is_refused_and_never_blessed(client, seeded, conn):
+    """SEC-112: retention is a control, not a note, and only the report's grammar has
+    meaning. Live pre-fix: `retention: "banana"` (or "90 days") was accepted on upload
+    and `_retention_due` returned None for it, which the report counted as
+    `within_retention` — evidence that never comes due while the report says it is
+    fine."""
+    import io
+
+    def upload(retention):
+        return client.post("/api/cases/1/evidence",
+                           files={"file": ("note.txt", io.BytesIO(b"synthetic"), "text/plain")},
+                           data={"classification": "internal", "retention": retention})
+
+    for bad in ("banana", "90 days", "ninety", "d90", "999999d"):
+        r = upload(bad)
+        assert r.status_code == 400, f"{bad}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] == "bad_retention"
+        assert r.json()["detail"]["allowed"]
+
+    # Accepted forms are normalised, and "no label" is null rather than "".
+    assert upload("6M").json()["retention"] == "6m"
+    assert upload("legal_hold").json()["retention"] == "legal_hold"
+    assert upload("1d").json()["retention"] == "1d"
+    assert upload("  ").json()["retention"] is None
+
+    # A row already stored with a label the report cannot parse is surfaced, not
+    # blessed: it must not land in `within_retention`.
+    conn.execute(
+        "INSERT INTO evidence (case_id, name, path, sha256, size, classification, retention, uploaded_by, created_at) "
+        "VALUES (1, 'legacy-typo.syn', 'syn/legacy.bin', 'c' * 64, 10, 'internal', 'banana', 'admin', ?)",
+        ("2000-01-02T03:04:05Z",))
+    conn.commit()
+    ev = client.get("/api/admin/retention/report").json()["evidence"]
+    assert ev["unrecognised_count"] >= 1
+    assert any(e["name"] == "legacy-typo.syn" for e in ev["unrecognised_retention"])
+    assert not any(e["name"] == "legacy-typo.syn" for e in ev["due_for_review"])
+
+
 # ------------------------------------------------------------- agent adapters
 
 def _make_agent(client, tools, adapter, config=None, name="adapt-test"):

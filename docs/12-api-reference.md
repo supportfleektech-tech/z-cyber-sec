@@ -100,6 +100,15 @@ they never touch real entities and dedupe against prior runs.
 `GET/POST /{case_id}/evidence` · `GET /evidence/{evidence_id}/download`
 (download requires `evidence.download`; all access audited — ADR-005).
 
+**Partial updates (SEC-111).** A PATCH writes the fields you **sent** and leaves the
+rest alone. An explicit `null` clears a nullable field (`{"assigned_to": null}`
+unassigns; JSON Merge Patch, RFC 7396) — it is *not* the same as omitting the field.
+An empty body is `400 no_changes`, and a `null` for a field whose column is
+`NOT NULL` (`status`, `title`) is `400 missing_field` naming it. This is implemented on
+`PATCH /soc/alerts/{id}` and `PATCH /cases/{case_id}`; the older PATCH routes
+(`/indicators/{id}`, `/cloud/posture/{id}`, `/exercises/{id}`) still treat `null` as
+"not sent", so use an empty string to clear a text field there.
+
 **Triage values are enums, on create and on update (SEC-110).** `status` ∈
 `{open, investigating, contained, mitigated, closed}`, `priority` ∈
 `{low, medium, high, critical}`, `severity` ∈

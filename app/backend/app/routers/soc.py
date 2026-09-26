@@ -259,6 +259,15 @@ def update_alert(alert_id: int, body: AlertUpdate, conn: sqlite3.Connection = De
     a = db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,))
     if not a:
         raise HTTPException(404, {"code": "not_found"})
+    # SEC-111: `None` was treated as "not sent" for every field, so a field could
+    # never be *cleared* — the SPA's unassign (`{assigned_to: null}`) answered
+    # `400 no_changes`, and the alternative (`""`) stores an empty string where
+    # "never assigned" is NULL elsewhere. A field the caller actually sent is now
+    # written, including an explicit null, which clears a nullable column
+    # (JSON Merge Patch, RFC 7396); an omitted field is still left alone.
+    provided = body.model_fields_set
+    if "status" in provided and body.status is None:
+        raise HTTPException(400, {"code": "missing_field", "message": "status must not be null."})
     if body.status is not None and body.status not in ALERT_STATUSES:
         raise HTTPException(400, {"code": "bad_status"})
     # SEC-081: dismissing an alert is a false-positive judgement, and it is the
@@ -271,25 +280,22 @@ def update_alert(alert_id: int, body: AlertUpdate, conn: sqlite3.Connection = De
         raise HTTPException(400, {"code": "note_required",
                                   "message": "dismissing an alert records a false-positive "
                                              "judgement — add a note saying why"})
-    fields, params = [], []
-    if body.status is not None:
-        fields.append("status = ?")
-        params.append(body.status)
-    if body.assigned_to is not None:
-        fields.append("assigned_to = ?")
-        params.append(body.assigned_to)
-    if body.notes is not None:
-        fields.append("notes = ?")
-        params.append(body.notes)
-    if not fields:
+    if not provided:
         raise HTTPException(400, {"code": "no_changes"})
+    fields, params = [], []
+    for name in ("status", "assigned_to", "notes"):
+        if name in provided:
+            fields.append(f"{name} = ?")
+            params.append(getattr(body, name))
     fields.append("updated_at = ?")
     params.append(db.utcnow())
     params.append(alert_id)
     conn.execute(f"UPDATE alerts SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
+    # SEC-111: audit the fields that were sent, so a clear is recorded as
+    # `{"assigned_to": null}` rather than vanishing from the entry.
     record_audit(conn, _actor(user), "alert.updated", target_type="alert", target_id=str(alert_id),
-                 detail={k: v for k, v in body.model_dump().items() if v is not None})
+                 detail={k: v for k, v in body.model_dump().items() if k in provided})
     return db.decode_json(db.one(conn, "SELECT * FROM alerts WHERE id = ?", (alert_id,)),
                           "event_ids", default=[])   # SEC-091
 

@@ -186,3 +186,29 @@ def test_alert_count_tracks_all_aggregated_events(client, seeded):
     assert first["inserted"] == 4 and second["inserted"] == 0 and second["skipped"] == 4
     row = db.one(seeded, "SELECT count, event_ids FROM alerts WHERE id = ?", (alert["id"],))
     assert row["count"] == len(json.loads(row["event_ids"])) == 18
+
+
+def test_alert_assignee_can_be_cleared_with_an_explicit_null(client, seeded):
+    """SEC-111: the SPA's unassign sends `{assigned_to: null}` (Soc.tsx), which the
+    route skipped as "not sent" — the analyst got `400 no_changes` and the assignee
+    stayed. `""` worked but stored an empty string where "never assigned" is NULL.
+    A sent field is now written, an explicit null clearing a nullable column."""
+    aid = client.get("/api/soc/alerts").json()["items"][0]["id"]
+    assert client.patch(f"/api/soc/alerts/{aid}", json={"assigned_to": "sasha"}).status_code == 200
+
+    r = client.patch(f"/api/soc/alerts/{aid}", json={"assigned_to": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["assigned_to"] is None
+    detail = client.get(f"/api/soc/alerts/{aid}").json()["alert"]
+    assert detail["assigned_to"] is None  # NULL, not ""
+
+    # An omitted field is untouched, an empty body is a no-op refusal, and a sent
+    # null for the NOT NULL status is refused by name.
+    assert client.patch(f"/api/soc/alerts/{aid}", json={"notes": "triage note"}).json()["notes"] == "triage note"
+    assert client.patch(f"/api/soc/alerts/{aid}", json={}).status_code == 400
+    r = client.patch(f"/api/soc/alerts/{aid}", json={"status": None})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "missing_field"
+
+    # Dismissal still demands its reason even when `notes` is sent as null.
+    r = client.patch(f"/api/soc/alerts/{aid}", json={"status": "dismissed", "notes": None})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "note_required"

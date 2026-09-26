@@ -6,6 +6,7 @@ sha256, classification, retention; every access audited.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import sqlite3
 from pathlib import Path
@@ -29,6 +30,13 @@ CASE_PRIORITIES = {"low", "medium", "high", "critical"}
 CASE_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 TASK_STATUSES = {"open", "in_progress", "done", "canceled"}
 CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
+# Evidence retention is a *control*, not a note (SEC-112): the retention report only
+# understands `<n><d|w|m|y>` and the sentinels below, and its `_retention_due` returns
+# None for anything else — which the report then counted as `within_retention`. A typo
+# ("banana", "90 days") therefore produced evidence that never came due for review
+# while the operator's report said it was fine.
+RETENTION_SENTINELS = {"legal-hold", "legal_hold", "retain-case-close", "indefinite"}
+RETENTION_RE = re.compile(r"^(\d{1,5})\s*([dwmy])$", re.IGNORECASE)
 MAX_EVIDENCE_BYTES = 25 * 1024 * 1024
 
 
@@ -39,8 +47,8 @@ def _actor(user: dict) -> dict:
 def _validate_triage(priority: str | None, severity: str | None) -> None:
     """Refuse a triage value outside the documented set (SEC-110).
 
-    `None` means "not provided" and stays allowed: severity is optional, the SPA sends
-    `undefined` for its blank option.
+    `None` is allowed: severity is optional (the SPA sends `undefined` for its blank
+    option) and, since SEC-111, a *sent* null clears a nullable column.
     """
     if priority is not None and priority not in CASE_PRIORITIES:
         raise HTTPException(400, {"code": "bad_priority", "allowed": sorted(CASE_PRIORITIES),
@@ -48,6 +56,26 @@ def _validate_triage(priority: str | None, severity: str | None) -> None:
     if severity is not None and severity not in CASE_SEVERITIES:
         raise HTTPException(400, {"code": "bad_severity", "allowed": sorted(CASE_SEVERITIES),
                                   "message": f"severity must be one of {sorted(CASE_SEVERITIES)}"})
+
+
+def _validate_retention(retention: str | None) -> str | None:
+    """Normalise a retention label, or refuse it (SEC-112).
+
+    Returns the canonical label (`90d`, `legal-hold`, …) or None for "no label".
+    """
+    if retention is None or not retention.strip():
+        return None
+    label = retention.strip().lower()
+    if label in RETENTION_SENTINELS:
+        return label
+    m = RETENTION_RE.match(label)
+    if not m:
+        raise HTTPException(400, {
+            "code": "bad_retention",
+            "message": ("retention must be a window like 90d, 4w, 6m or 12y — or one of "
+                        f"{sorted(RETENTION_SENTINELS)}"),
+            "allowed": sorted(RETENTION_SENTINELS) + ["<n>d", "<n>w", "<n>m", "<n>y"]})
+    return f"{int(m.group(1))}{m.group(2)}"
 
 
 def _next_number(conn) -> str:
@@ -168,14 +196,20 @@ def update_case(case_id: int, body: CaseUpdate, conn: sqlite3.Connection = Depen
         raise HTTPException(400, {"code": "bad_status", "allowed": sorted(CASE_STATUSES),
                                   "message": f"status must be one of {sorted(CASE_STATUSES)}"})
     _validate_triage(body.priority, body.severity)
+    # SEC-111: same rule as alerts — a field the caller *sent* is written (an
+    # explicit null clears a nullable column, RFC 7396), an omitted field is left
+    # alone, and a sent null for a NOT NULL column is refused by name.
+    provided = body.model_fields_set
+    if not provided:
+        raise HTTPException(400, {"code": "no_changes"})
+    for f in ("title", "status"):
+        if f in provided and getattr(body, f) is None:
+            raise HTTPException(400, {"code": "missing_field", "message": f"{f} must not be null."})
     fields, params = [], []
     for f in ("title", "description", "status", "priority", "severity", "assigned_to"):
-        v = getattr(body, f)
-        if v is not None:
+        if f in provided:
             fields.append(f"{f} = ?")
-            params.append(v)
-    if not fields and body.notes is None:
-        raise HTTPException(400, {"code": "no_changes"})
+            params.append(getattr(body, f))
     fields.append("updated_at = ?")
     params.append(db.utcnow())
     params.append(case_id)
@@ -200,7 +234,7 @@ def update_case(case_id: int, body: CaseUpdate, conn: sqlite3.Connection = Depen
         conn.execute("INSERT INTO case_timeline (case_id, ts, actor, entry_type, message) "
                      "VALUES (?, ?, ?, 'note', ?)", (case_id, now, user["username"], body.notes))
     conn.commit()
-    detail = {k: v for k, v in body.model_dump().items() if v is not None}
+    detail = {k: v for k, v in body.model_dump().items() if k in provided}  # SEC-111
     if body.status is not None and body.status != c["status"]:
         detail["from_status"], detail["to_status"] = c["status"], body.status
         detail["reopened"] = reopened
@@ -281,6 +315,7 @@ def upload_evidence(case_id: int, file: UploadFile,
         raise HTTPException(404, {"code": "not_found"})
     if classification not in CLASSIFICATIONS:
         raise HTTPException(400, {"code": "bad_classification"})
+    retention = _validate_retention(retention)
     content = file.file.read()
     if len(content) > MAX_EVIDENCE_BYTES:
         raise HTTPException(413, {"code": "too_large", "message": f"max {MAX_EVIDENCE_BYTES} bytes"})
@@ -307,7 +342,8 @@ def upload_evidence(case_id: int, file: UploadFile,
     conn.commit()
     record_audit(conn, _actor(user), "evidence.uploaded", target_type="evidence",
                  target_id=str(cur.lastrowid), detail={"name": file.filename, "sha256": sha,
-                                                       "classification": classification})
+                                                       "classification": classification,
+                                                       "retention": retention})
     return db.one(conn, "SELECT * FROM evidence WHERE id = ?", (cur.lastrowid,))
 
 

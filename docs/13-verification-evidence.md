@@ -858,13 +858,14 @@ describe the run, and an import does not rewrite a reported status) and 289 → 
 refused and inert), 291 → 292 (1 new: an oversized number is a client error, not
 a 500) and 292 → 295 (3 new: a null into a NOT NULL column is refused, a falsy id no
 longer skips its existence check, and the constraint net answers documented codes)
-and 295 → 296 (1 new: a case's triage fields are enums on create *and* update),
-ruff clean.
+295 → 296 (1 new: a case's triage fields are enums on create *and* update) and
+296 → 298 (2 new: a nullable field can be cleared with an explicit null, on alerts and
+on cases), ruff clean.
 
-**Current totals:** **296 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **298 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-110 series was reproduced first (as a failing check or a live request) and
+SEC-111 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1663,3 +1664,38 @@ the set; a valid `{priority: "critical", severity: "info"}` update → 200; the 
 writes leave the case's stored triage unchanged; a task PATCH with a bad status →
 `400 bad_status`, a 101-character `assigned_to` → `422`, and a valid reassignment →
 200.
+
+### SEC-111 — a field could never be cleared (fixed)
+
+Found while checking the SPA's own PATCH bodies against the routes they call:
+`Soc.tsx` clears an alert's assignee by sending `{"assigned_to": null}`, and every
+PATCH route treats `None` as *"not sent"*, so the field was skipped, the diff came out
+empty and the analyst got `400 no_changes` — the unassign silently did not happen.
+
+**Was:** "only the fields the caller actually sent are written" (SEC-088) was
+implemented as `if value is not None`, which cannot tell *omitted* from *sent as null*.
+A nullable field therefore had no clear path at all: the SPA's null was refused, and
+the alternative — `{"assigned_to": ""}` — **worked** but stored an empty string where
+"never assigned" is `NULL` everywhere else (`SELECT quote(assigned_to)` on the seeded
+alert: `NULL`, after the empty-string clear: `''`), so the two representations of "no
+assignee" drifted apart.
+
+**Fixed** (the two routes whose whole update mechanism is that loop, alerts and cases):
+a field the caller **sent** is written, including an explicit `null`, which clears a
+nullable column (JSON Merge Patch, RFC 7396); an omitted field is untouched; an empty
+body is still `400 no_changes`; a sent `null` for a `NOT NULL` column is
+`400 missing_field` naming it. The audit entry is built from the sent fields, so a
+clear is recorded as `{"assigned_to": null}` instead of vanishing from the entry.
+
+**Live (after fix):** assign then clear → `200`, column back to `NULL` (not `''`), audit
+`alert.updated {"assigned_to": null}`; `{"status": null}` → `400 missing_field`;
+`{}` → `400 no_changes`; dismissing with `notes: null` still → `400 note_required`;
+on cases `{"assigned_to": null}`/`{"severity": null}` clear while an omitted `priority`
+is kept, `{"title": null}` → `400 missing_field`, and the audit rows read
+`{"assigned_to": null}` / `{"severity": null}`.
+
+**Follow-up (recorded, not done):** `PATCH /api/intel/indicators/{id}`,
+`/api/cloud/posture/{id}` and `/api/exercises/{id}` still read `None` as "not sent", so
+the same clear-path gap remains there; each needs the same `model_fields_set` switch
+plus the JSON-column case (`db.jdump(None)` writes the *text* `"null"`, so a nullable
+JSON column needs an explicit `None`).
