@@ -22,6 +22,11 @@ from ..deps import require
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
 CASE_STATUSES = {"open", "investigating", "contained", "mitigated", "closed"}
+# The SPA's New-case form offers exactly these (Incidents.tsx), and they are the
+# standard five used by alerts and vulns (SEC-079/082) — a case's triage fields are
+# not free text (SEC-110).
+CASE_PRIORITIES = {"low", "medium", "high", "critical"}
+CASE_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 TASK_STATUSES = {"open", "in_progress", "done", "canceled"}
 CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
 MAX_EVIDENCE_BYTES = 25 * 1024 * 1024
@@ -29,6 +34,20 @@ MAX_EVIDENCE_BYTES = 25 * 1024 * 1024
 
 def _actor(user: dict) -> dict:
     return {"type": "user", "id": str(user["user_id"]), "name": user["username"]}
+
+
+def _validate_triage(priority: str | None, severity: str | None) -> None:
+    """Refuse a triage value outside the documented set (SEC-110).
+
+    `None` means "not provided" and stays allowed: severity is optional, the SPA sends
+    `undefined` for its blank option.
+    """
+    if priority is not None and priority not in CASE_PRIORITIES:
+        raise HTTPException(400, {"code": "bad_priority", "allowed": sorted(CASE_PRIORITIES),
+                                  "message": f"priority must be one of {sorted(CASE_PRIORITIES)}"})
+    if severity is not None and severity not in CASE_SEVERITIES:
+        raise HTTPException(400, {"code": "bad_severity", "allowed": sorted(CASE_SEVERITIES),
+                                  "message": f"severity must be one of {sorted(CASE_SEVERITIES)}"})
 
 
 def _next_number(conn) -> str:
@@ -61,8 +80,11 @@ class CaseUpdate(BaseModel):
 @router.post("", status_code=201)
 def create_case(body: CaseIn, conn: sqlite3.Connection = Depends(db.get_conn),
                 user: dict = Depends(require("cases.write"))):
-    if body.priority and body.priority not in {"low", "medium", "high", "critical"}:
-        raise HTTPException(400, {"code": "bad_priority"})
+    # SEC-110: `if body.priority and …` let an empty string through ("" is falsy and
+    # not in the set), and `severity` was never validated at all on create or update,
+    # so a case could be filed as `severity: "banana"` — invisible to every count that
+    # groups by the standard five.
+    _validate_triage(body.priority, body.severity)
     now = db.utcnow()
     number = _next_number(conn)
     source = body.source
@@ -139,8 +161,13 @@ def update_case(case_id: int, body: CaseUpdate, conn: sqlite3.Connection = Depen
     c = db.one(conn, "SELECT * FROM cases WHERE id = ?", (case_id,))
     if not c:
         raise HTTPException(404, {"code": "not_found"})
-    if body.status and body.status not in CASE_STATUSES:
-        raise HTTPException(400, {"code": "bad_status"})
+    # SEC-110: `if body.status and …` skipped the check for an empty string, which is
+    # falsy — `PATCH {"status": ""}` was accepted and stored a case with no status,
+    # which then appeared as its own bucket in every `GROUP BY status` count.
+    if body.status is not None and body.status not in CASE_STATUSES:
+        raise HTTPException(400, {"code": "bad_status", "allowed": sorted(CASE_STATUSES),
+                                  "message": f"status must be one of {sorted(CASE_STATUSES)}"})
+    _validate_triage(body.priority, body.severity)
     fields, params = [], []
     for f in ("title", "description", "status", "priority", "severity", "assigned_to"):
         v = getattr(body, f)
@@ -190,6 +217,15 @@ class TaskIn(BaseModel):
     due: str | None = Field(default=None, max_length=40)
 
 
+class TaskUpdate(BaseModel):
+    """SEC-110: the task PATCH took a raw `dict` and wrote any of its keys, so the
+    create-side bounds (`assigned_to` ≤100, `due` ≤40) did not apply here and the
+    endpoint had no schema in `/api/openapi.json` at all."""
+    status: str | None = None
+    assigned_to: str | None = Field(default=None, max_length=100)
+    due: str | None = Field(default=None, max_length=40)
+
+
 @router.post("/{case_id}/tasks", status_code=201)
 def add_task(case_id: int, body: TaskIn, conn: sqlite3.Connection = Depends(db.get_conn),
              user: dict = Depends(require("cases.write"))):
@@ -208,17 +244,17 @@ def add_task(case_id: int, body: TaskIn, conn: sqlite3.Connection = Depends(db.g
 
 
 @router.patch("/tasks/{task_id}")
-def update_task(task_id: int, body: dict, conn: sqlite3.Connection = Depends(db.get_conn),
+def update_task(task_id: int, body: TaskUpdate, conn: sqlite3.Connection = Depends(db.get_conn),
                 user: dict = Depends(require("cases.write"))):
     t = db.one(conn, "SELECT * FROM case_tasks WHERE id = ?", (task_id,))
     if not t:
         raise HTTPException(404, {"code": "not_found"})
-    allowed = {"status", "assigned_to", "due"}
+    if body.status is not None and body.status not in TASK_STATUSES:
+        raise HTTPException(400, {"code": "bad_status", "allowed": sorted(TASK_STATUSES),
+                                  "message": f"status must be one of {sorted(TASK_STATUSES)}"})
     fields, params = [], []
-    for k, v in (body or {}).items():
-        if k in allowed and v is not None:
-            if k == "status" and v not in TASK_STATUSES:
-                raise HTTPException(400, {"code": "bad_status"})
+    for k, v in body.model_dump().items():
+        if v is not None:
             fields.append(f"{k} = ?")
             params.append(v)
     if not fields:
@@ -229,7 +265,7 @@ def update_task(task_id: int, body: dict, conn: sqlite3.Connection = Depends(db.
     conn.execute(f"UPDATE case_tasks SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
     record_audit(conn, _actor(user), "case_task.updated", target_type="case_task", target_id=str(task_id),
-                 detail={k: v for k, v in (body or {}).items() if k in allowed})
+                 detail={k: v for k, v in body.model_dump().items() if v is not None})
     return db.one(conn, "SELECT * FROM case_tasks WHERE id = ?", (task_id,))
 
 

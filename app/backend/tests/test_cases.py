@@ -143,3 +143,32 @@ def test_reopening_a_case_clears_closed_at(client, seeded):
     from pathlib import Path
     body = Path(html["path"]).read_text()
     assert "Reopen me" in body
+
+
+def test_case_triage_fields_are_not_free_text(client, seeded):
+    """SEC-110: a case's triage fields are enums, but only `create` checked one of
+    them — and with a truthiness test, so an empty string passed. Live pre-fix:
+    `PATCH /api/cases/1 {"priority": "banana"}` and `{"severity": "banana"}` both
+    answered 200 and were stored, and `{"status": ""}` was stored too (a case with no
+    status, which then counted as its own bucket in every `GROUP BY status`)."""
+    # create: both fields validated, empty string included
+    for bad in ({"priority": "banana"}, {"priority": ""}, {"severity": "banana"}, {"severity": ""}):
+        r = client.post("/api/cases", json={"title": "Bad triage case", **bad})
+        assert r.status_code == 400, f"{bad}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] in ("bad_priority", "bad_severity")
+        assert r.json()["detail"]["allowed"]  # names the allowed values
+
+    # update: same sets, and a valid update still works
+    cid = client.get("/api/cases").json()["items"][0]["id"]
+    before = client.get(f"/api/cases/{cid}").json()
+    for bad in ({"priority": "banana"}, {"severity": "banana"}, {"status": ""}):
+        r = client.patch(f"/api/cases/{cid}", json=bad)
+        assert r.status_code == 400, f"{bad}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] in ("bad_priority", "bad_severity", "bad_status")
+    after = client.get(f"/api/cases/{cid}").json()
+    assert (after["priority"], after["severity"], after["status"]) == \
+        (before["priority"], before["severity"], before["status"])
+
+    r = client.patch(f"/api/cases/{cid}", json={"priority": "critical", "severity": "info"})
+    assert r.status_code == 200, r.text
+    assert r.json()["priority"] == "critical" and r.json()["severity"] == "info"

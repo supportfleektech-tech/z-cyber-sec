@@ -857,13 +857,14 @@ describe the run, and an import does not rewrite a reported status) and 289 → 
 (2 new: a scope change is audited with before/after, and an unreadable window is
 refused and inert), 291 → 292 (1 new: an oversized number is a client error, not
 a 500) and 292 → 295 (3 new: a null into a NOT NULL column is refused, a falsy id no
-longer skips its existence check, and the constraint net answers documented codes),
+longer skips its existence check, and the constraint net answers documented codes)
+and 295 → 296 (1 new: a case's triage fields are enums on create *and* update),
 ruff clean.
 
-**Current totals:** **295 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **296 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-109 series was reproduced first (as a failing check or a live request) and
+SEC-110 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1630,3 +1631,35 @@ went into the INSERT, where the foreign key failed. The same falsy trap sat on
 `400 missing_field`; `asset_id: 0`, `asset_id: "0"` and `asset_id: 9999` →
 `400 bad_asset`; `source_id: 0` → `400 bad_source`; the indicator row is unchanged
 after the refused writes.
+
+### SEC-110 — a case's triage fields were free text (fixed)
+
+Found by the body fuzzer's "accepted garbage" pass: it reports every mutation the API
+*accepted*, and `PATCH /api/cases/1 {"priority": "banana"}` came back 200. Live
+pre-fix: `priority`, `severity` and `assigned_to` were all stored unvalidated on
+update, `severity` was never validated anywhere, and the two checks that existed used
+a truthiness test — `create`'s priority check and `update`'s status check both read
+`if body.x and …`, so `""` (falsy) skipped them, and `{"status": ""}` stored a case
+with no status, which then appeared as its own bucket in every `GROUP BY status`.
+
+**Fixed:**
+- One shared `_validate_triage` for create **and** update: `priority` ∈
+  `{low, medium, high, critical}` and `severity` ∈ the standard five
+  `{critical, high, medium, low, info}` — exactly the values the SPA's New-case form
+  offers and the sets alerts and vulns already enforce (SEC-079/082), returning
+  `400 bad_priority` / `400 bad_severity` with `allowed[]`. `None` still means "not
+  provided" (severity is optional; the SPA sends `undefined` for its blank option).
+- `status` and the triage checks now test `is not None`, so an empty string is a
+  `400 bad_status`/`bad_priority`/`bad_severity` naming the allowed values instead of
+  a stored row nobody counts.
+- `PATCH /api/cases/tasks/{id}` took a **raw `dict`** and wrote any of its keys, so the
+  create-side bounds did not apply and the endpoint had no schema in the OpenAPI
+  document; it now takes a `TaskUpdate` model (status enum + `assigned_to` ≤100,
+  `due` ≤40). The audit entry is built from the same model.
+
+**Live (after fix):** `priority: "banana"`, `severity: "banana"`, `status: ""`,
+`priority: ""` and `severity: "banana"` on create all → `400` with `allowed[]` naming
+the set; a valid `{priority: "critical", severity: "info"}` update → 200; the refused
+writes leave the case's stored triage unchanged; a task PATCH with a bad status →
+`400 bad_status`, a 101-character `assigned_to` → `422`, and a valid reassignment →
+200.

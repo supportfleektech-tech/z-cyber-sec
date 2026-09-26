@@ -100,6 +100,18 @@ they never touch real entities and dedupe against prior runs.
 `GET/POST /{case_id}/evidence` · `GET /evidence/{evidence_id}/download`
 (download requires `evidence.download`; all access audited — ADR-005).
 
+**Triage values are enums, on create and on update (SEC-110).** `status` ∈
+`{open, investigating, contained, mitigated, closed}`, `priority` ∈
+`{low, medium, high, critical}`, `severity` ∈
+`{critical, high, medium, low, info}` — the same five alerts and vulns use, and the
+same options the SPA offers. Anything else is `400 bad_status` / `bad_priority` /
+`bad_severity` with `allowed[]`, including the empty string (`"" is falsy` used to
+skip both checks, so a case could be stored with no status and then counted as its
+own bucket). `assigned_to` is a display name bounded to 100 characters, as on alerts.
+`PATCH /tasks/{task_id}` takes `{status, assigned_to, due}` (status validated against
+`{open, in_progress, done, canceled}`), and `assigned_to`/`due` keep the create-side
+bounds.
+
 ### Threat intel (`/api/intel`)
 `GET/POST /indicators` · `PATCH /indicators/{id}` (status lifecycle
 `active|expired|revoked`) · `POST /indicators/stix` (STIX 2.1 bundle
