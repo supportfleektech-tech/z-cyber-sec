@@ -9,8 +9,12 @@
 *.key
 secrets/
 
-# Runtime data (local-first, synthetic by default)
+# Runtime data (local-first, synthetic by default). The default is
+# app/backend/data/; /data/ covers a DATA_DIR override to the repo root, which
+# would otherwise leave the live database (audit log, evidence, backups) as an
+# untracked file one `git add -A` away from being committed.
 app/backend/data/
+/data/
 backups/
 evidence-private/
 audit-private/

@@ -861,14 +861,16 @@ longer skips its existence check, and the constraint net answers documented code
 295 → 296 (1 new: a case's triage fields are enums on create *and* update) and
 296 → 298 (2 new: a nullable field can be cleared with an explicit null, on alerts and
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
-never counted as "within retention") and 299 → 300 (1 new: a scan run's kind, status
+never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
 and timestamps are validated, and the import always reports the run's status),
+300 → 305 (5 new: the lab range registry and its cross-checks ×2, the operator
+self-diagnosis, the baseline security headers, and the doctor's access rule split out),
 ruff clean.
 
-**Current totals:** **300 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **305 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-113 series was reproduced first (as a failing check or a live request) and
+SEC-117 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1766,3 +1768,103 @@ authoritative).
 → 201, import → `{..., "status": "completed", "note": "run advanced from 'running' to
 'completed'"}`; a `failed` run → `{..., "status": "failed", "note": "run stays
 'failed': …"}`.
+
+### SEC-114 → SEC-117 — completion review: what the build was missing
+
+A full inventory pass against the plan's own acceptance criteria (`planning/plan.md`,
+`planning/acceptance-criteria.md`, `agents/MASTER_BUILD_PROMPT.md`) rather than against
+a bug report. Four gaps were found and closed; one tool was added.
+
+#### SEC-114 — the demo database did not exercise six of the platform's own features
+
+`seed_demo` produced alerts, cases, intel, vulns, AppSec, cloud, GRC, exercises and
+agents, and then stopped: `reports` (0), `report_schedules` (0), `exploitability_reviews`
+(0), `attack_chains` (0), `releases` (0) and `saved_searches` (0) were all empty. Those
+pages rendered "nothing here" on a fresh install, the smoke check could only 404 their
+read paths, and the tradecraft/GRC screenshots in the docs described features the demo
+never showed.
+
+**Fixed:** `seed_lab_extras(conn)` runs after detection and the demo case (the reports
+read the alerts those steps produce) and is idempotent per section. It creates two real
+report artefacts through `ReportBuilder` (provenance, input counts and snapshot hash
+included), two schedules (one active, one paused with a `last_run_at`), an
+exploitability review against an in-scope lab target, a two-step validated attack chain,
+a saved searches pair, a release decision record whose `checklist_sha256` is the real
+hash of `docs/14-release-checklist.md`, and the range registration below. Verified:
+`/api/reports` answers 2 artefacts, `/api/reports/schedules` 2 rows, `/api/tradecraft/chains`
+1, `/api/tradecraft/reviews` 1, `/api/admin/releases` 1.
+
+#### SEC-115 — the lab had no range: nothing recorded which targets exist
+
+The platform's exercises authorize *targets*, and the tradecraft scope guard refuses
+work outside them — but no table recorded which targets the lab actually runs. The demo
+seed proved the gap: exercise 2 was authorized against `lab-ctf-target-01`, a hostname no
+container ever served. Nothing could tell **"authorized but not up"** (a session that
+will fail) from **"up but not authorized"** (scope drift, the dangerous one).
+
+**Added:**
+- `lab_targets` (migration 0007) — name, kind, endpoint, image/profile, exposure,
+  status, purpose — plus `/api/lab/targets` (list/register/patch) with `lab.read` for
+  every role and `lab.write` for ir_lead/admin. Endpoints are validated as *interior* to
+  the lab: no scheme, no path, no loopback, no public names → `400 bad_endpoint`. A
+  target an active exercise still authorizes cannot be retired (`409 target_in_use`,
+  naming the holder).
+- `/api/lab/coverage` — the cross-check: `authorized_but_not_running`,
+  `running_but_not_authorized`, `authorizations_with_no_target`, plus
+  `other_authorized_targets` (mailboxes, vendor hosts — legitimate, informational) and an
+  `ok` verdict (`ok` is false only for the two contradictions — a target running with no
+  authorization, or an authorization naming an unregistered range target — because a
+  stopped range between sessions is normal). Deliberately narrow: only names that read like range targets
+  (`lab-*`, `*.lab`, `host:port`) count as dangling, because a check that cries wolf is
+  one somebody turns off.
+- A **Lab range** SPA page (nav: Assurance) showing the registry, the four verdict
+  counters, per-target scope and the cross-checks.
+- `infra/lab/docker-compose.yml` — the range itself: Juice Shop, a DVWA-style CTF target
+  and `lab-api-01`, all on an `internal: true` network, ports published to `127.0.0.1`
+  only, with compose profiles (`juice`/`ctf`/`api`). `infra/lab/api/labapi.py` is our own
+  intentionally vulnerable API (IDOR, unauthorised admin route, debug env dump) so the
+  range needs no third-party image.
+- The seed now registers three targets and authorizes the CTF exercise with an explicit
+  window over them, so the demo data is *in scope* rather than merely typed in.
+
+**Live:** `/api/lab/targets` 3 rows; bad endpoints (`https://evil.example/`,
+`127.0.0.1:3000`, `juice.example.com:3000`) all → `400 bad_endpoint`; `/api/lab/coverage`
+reports the seeded targets `in_scope: true` with their authorizing exercise, the seeded
+phish-drill mailboxes under `other_authorized_targets` (not an error), and `ok: true`.
+
+#### SEC-116 — "is this install healthy?" needed six different pages
+
+Migrations, the audit chain, scheduler failures, backup freshness, directory
+permissions, the environment guards and the range cross-check each had their own page or
+endpoint. `GET /api/admin/doctor` (admin `audit.read`) aggregates eleven checks into one
+verdict (`ok`/`warn`/`fail`), each with the values behind it and a `fix_hint` naming the
+action; it is read-only by construction (never writes, retries or repairs) and always
+answers. The Admin page's new default tab renders it. Verified in-suite and against a
+seeded install: `verdict: fail` with `backup.freshness: fail` + hint on a fresh database
+(no backup yet), `audit.chain: ok`, `database.migrations: ok (7 applied, 0 pending)`.
+
+#### SEC-117 — the hardening headers existed only at the edge
+
+`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and HSTS lived in the
+Caddyfile, so any deployment without that edge — a hand-started uvicorn, an internal
+operator host, a staging stack behind someone else's proxy — served the SPA with no
+framing, MIME-sniffing or referrer policy. They are now set in the application
+(`setdefault`, so the edge can still override), with a tight CSP
+(`default-src 'self'`; `style-src 'self' 'unsafe-inline'` for the bundled component
+styles; `frame-ancestors 'none'`) and `Permissions-Policy`. HSTS is sent only when the
+request arrived over TLS, because pinning a browser to `https` for a loopback preview
+host would break the local lab.
+
+#### New tool — `scripts/smoke_check.py`
+
+An operator/CI smoke check that walks the *live* OpenAPI surface: it fills every path
+parameter from real rows, then asserts every read route answers 2xx for an admin, every
+route answers 401 unauthenticated, a fixed list of fourteen consequential writes answers
+403 for a viewer, and no write route 5xx's or 401's for an authenticated viewer. It skips
+only the documented public routes (`/api/healthz`, `/metrics`, the API docs) and prints
+the unresolved-id 404s as notes instead of failures. Against the seeded install:
+**214 checks, 0 failures** (`SMOKE OK`), with the surface reported as 102 paths / 136
+operations. Path parameters are filled from real rows (so the happy path is exercised
+rather than a 404), and the two parameters the checker legitimately cannot resolve —
+a per-user resource the admin owns none of — are reported with the reason instead of
+as a dataset gap. Usage: `python -m scripts.smoke_check [--base-url …] [--json]`.

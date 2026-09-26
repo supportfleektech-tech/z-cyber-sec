@@ -53,7 +53,7 @@ const ROLES = ["admin", "ir_lead", "soc_analyst", "viewer", "agent_service"];
 
 export default function Admin() {
   const [flash, flashShow] = useFlash();
-  const [tab, setTab] = useState<"audit" | "users" | "integrations" | "flags" | "backup" | "releases">("audit");
+  const [tab, setTab] = useState<"doctor" | "audit" | "users" | "integrations" | "flags" | "backup" | "releases">("doctor");
   return (
     <>
       <PageHead
@@ -62,18 +62,81 @@ export default function Admin() {
       />
       {flash}
       <div className="toolbar">
-        {(["audit", "users", "integrations", "flags", "backup", "releases"] as const).map((t) => (
+        {(["doctor", "audit", "users", "integrations", "flags", "backup", "releases"] as const).map((t) => (
           <button key={t} className={tab === t ? "primary small" : "small"} onClick={() => setTab(t)}>
             {t}
           </button>
         ))}
       </div>
+      {tab === "doctor" && <DoctorTab />}
       {tab === "audit" && <AuditTab onFlash={flashShow} />}
       {tab === "users" && <UsersTab onFlash={flashShow} />}
       {tab === "integrations" && <IntegrationsTab onFlash={flashShow} />}
       {tab === "flags" && <FlagsTab onFlash={flashShow} />}
       {tab === "backup" && <BackupTab onFlash={flashShow} />}
       {tab === "releases" && <ReleasesTab onFlash={flashShow} />}
+    </>
+  );
+}
+
+interface DoctorCheck {
+  check: string;
+  status: "ok" | "warn" | "fail";
+  detail: Record<string, unknown> | null;
+  fix_hint: string | null;
+}
+interface DoctorReport {
+  env: string;
+  version: string | null;
+  generated_at: string;
+  verdict: "ok" | "warn" | "fail";
+  summary: { checks: number; ok: number; warn: number; fail: number };
+  checks: DoctorCheck[];
+  note: string;
+}
+
+// SEC-116: one place to answer "is this install healthy?" — the same aggregation
+// the CLI smoke check and the runbook use, instead of six different pages.
+function DoctorTab() {
+  const doctor = useApi<DoctorReport>(() => api.get<DoctorReport>("/api/admin/doctor"), []);
+  const d = doctor.data;
+  return (
+    <>
+      <div className="panel">
+        <div className="row">
+          <h2 style={{ margin: 0 }}>Self-diagnosis</h2>
+          <button className="small" onClick={() => doctor.reload()}>Re-run</button>
+        </div>
+        <LoadBlock loading={doctor.loading} error={doctor.error} empty={!d}>
+          {d && (
+            <>
+              <div className="note-box">
+                Verdict: <b>{d.verdict.toUpperCase()}</b> — {d.summary.ok} ok, {d.summary.warn} warn,{" "}
+                {d.summary.fail} fail of {d.summary.checks} checks · env {d.env}
+                {d.version ? ` · v${d.version}` : ""} · {fmtTs(d.generated_at)}
+              </div>
+              <table className="tbl">
+                <thead>
+                  <tr><th>Check</th><th>Status</th><th>Detail</th><th>If it fails</th></tr>
+                </thead>
+                <tbody>
+                  {d.checks.map((c) => (
+                    <tr key={c.check}>
+                      <td>{c.check}</td>
+                      <td><StBadge value={c.status} /></td>
+                      <td className="dim" style={{ maxWidth: 460, wordBreak: "break-word" }}>
+                        {c.detail ? fmtJson(c.detail) : "—"}
+                      </td>
+                      <td className="dim">{c.status === "ok" ? "—" : c.fix_hint || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="faint f">{d.note}</div>
+            </>
+          )}
+        </LoadBlock>
+      </div>
     </>
   );
 }

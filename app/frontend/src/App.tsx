@@ -12,6 +12,7 @@ import Appsec from "./pages/Appsec";
 import Cloud from "./pages/Cloud";
 import Grc from "./pages/Grc";
 import Exercises from "./pages/Exercises";
+import Lab from "./pages/Lab";
 import Tradecraft from "./pages/Tradecraft";
 import Agents from "./pages/Agents";
 import Automation from "./pages/Automation";
@@ -53,6 +54,7 @@ const NAV: { group: string; items: [string, string][] }[] = [
     items: [
       ["/grc", "GRC"],
       ["/exercises", "Exercises"],
+      ["/lab", "Lab range"],
       ["/tradecraft", "Tradecraft"],
     ],
   },
@@ -138,6 +140,7 @@ function Shell() {
           <Route path="/cloud" element={<Cloud />} />
           <Route path="/grc" element={<Grc />} />
           <Route path="/exercises" element={<Exercises />} />
+          <Route path="/lab" element={<Lab />} />
           <Route path="/tradecraft" element={<Tradecraft />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/automation" element={<Automation />} />

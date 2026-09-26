@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import random
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import yaml
 
@@ -513,6 +514,171 @@ def demo_case_and_evidence(conn) -> bool:
     return True
 
 
+def seed_lab_extras(conn) -> dict:
+    """Fill the feature surfaces the base seed left empty (SEC-114).
+
+    The demo database used to have no reports, schedules, tradecraft reviews, chains,
+    releases or saved searches, so those pages rendered "nothing here" and the CLI
+    smoke check could not exercise their read paths at all. Everything below is
+    synthetic, deterministic and idempotent (each section no-ops if its rows exist).
+
+    Order matters: this runs *after* detection and the demo case, because the reports
+    read the alert/case/vuln data those steps produce.
+    """
+    out: dict = {}
+    now = datetime.now(UTC)
+    iso = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+
+    # ---- lab range registration + the authorized exercise that covers it (SEC-115)
+    lab_targets = [
+        ("lab-ctf-target-01", "web", "lab-ctf-target-01:8080", "ctf", "medium",
+         "Deliberately vulnerable web app image (OWASP-style challenges)."),
+        ("lab-juice-01", "web", "lab-juice-01:3000", "owasp", "high",
+         "Juice Shop-style target for AppSec practice."),
+        ("lab-api-01", "api", "lab-api-01:8001", "api", "medium",
+         "Intentionally broken REST API for authz/IDOR exercises."),
+    ]
+    if not db.one(conn, "SELECT id FROM lab_targets LIMIT 1"):
+        for name, kind, endpoint, image, exposure, purpose in lab_targets:
+            conn.execute(
+                "INSERT INTO lab_targets (name, kind, endpoint, image, exposure, status, purpose, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'registered', ?, ?, ?)",
+                (name, kind, endpoint, image, exposure, purpose, db.utcnow(), db.utcnow()))
+        out["lab_targets"] = len(lab_targets)
+        record_audit(conn, SYSTEM, "seed.lab_targets", detail={"count": len(lab_targets)})
+
+    ctf = db.one(conn, "SELECT * FROM exercises WHERE name LIKE 'Local CTF%'")
+    if ctf and ctf["status"] == "planned":
+        # An exercise is the written authorization (SEC-107): give the CTF run a
+        # window and put the *registered* lab targets in scope, so the tradecraft
+        # evidence below is genuinely in-scope rather than typed in by hand.
+        conn.execute(
+            "UPDATE exercises SET status='authorized', owner='iris', starts_at=?, ends_at=?, targets=?, "
+            "updated_at=? WHERE id=?",
+            (iso(now - timedelta(days=2)), iso(now + timedelta(days=28)),
+             db.jdump([t[0] for t in lab_targets]), db.utcnow(), ctf["id"]))
+        conn.execute("INSERT INTO exercise_runs (exercise_id, started_at, result, detail) "
+                     "VALUES (?, ?, 'in_progress', ?)",
+                     (ctf["id"], iso(now - timedelta(days=2)),
+                      db.jdump({"note": "Synthetic lab range session (demo data)."})))
+        out["ctf_exercise_authorized"] = True
+
+    # ---- saved searches
+    if not db.one(conn, "SELECT id FROM saved_searches LIMIT 1"):
+        saved = [
+            ("Critical alerts, still open", "iris", "alerts",
+             {"severity": "critical", "status": "new"}),
+            ("Login activity on lab-web-01", "sasha", "events",
+             {"host": "lab-web-01", "action": "login_failed"}),
+        ]
+        for name, owner, module, params in saved:
+            conn.execute("INSERT INTO saved_searches (name, owner, module, params, created_at) "
+                         "VALUES (?, ?, ?, ?, ?)", (name, owner, module, db.jdump(params), db.utcnow()))
+        out["saved_searches"] = len(saved)
+
+    # ---- tradecraft: an exploitability review against an in-scope lab target, and a
+    # two-step chain that shows why a medium finding becomes high when combined.
+    review_vuln = db.one(conn, "SELECT * FROM vuln_findings ORDER BY "
+                         "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, id LIMIT 1")
+    review_target = "lab-juice-01" if db.one(conn, "SELECT id FROM lab_targets WHERE name = 'lab-juice-01'") \
+        else "lab-web-01"
+    exercise_id = ctf["id"] if ctf else None
+    if review_vuln and (exercise_id is None or db.one(conn, "SELECT id FROM exercises WHERE id = ?", (exercise_id,))):
+        from ..services.tradecraft import _fingerprint
+        if not db.one(conn, "SELECT id FROM exploitability_reviews LIMIT 1"):
+            conn.execute(
+                "INSERT INTO exploitability_reviews (vuln_id, exercise_id, target, verdict, trust_boundary, "
+                "impact_before, impact_after, preconditions, evidence, reproduction, rationale, triage_ready, "
+                "policy_note, dedupe_key, reviewed_by, created_at) "
+                "VALUES (?, ?, ?, 'exploitable', 'user->admin', ?, ?, ?, ?, ?, ?, 1, ?, ?, 'iris', ?)",
+                (review_vuln["id"], exercise_id, review_target,
+                 "Requires an authenticated low-privilege session; no admin rights needed.",
+                 "Low-privileged user reaches the admin configuration endpoint and can change the "
+                 "signing key, i.e. user -> admin.",
+                 db.jdump(["Authenticated low-priv session", "Target reachable from the lab range only"]),
+                 db.jdump([{"kind": "http", "request": "GET /api/admin/config (low-priv cookie)",
+                            "response": "200 OK — signing key returned"}]),
+                 "1) Log in as a lab user. 2) Replay the request with the low-priv cookie. "
+                 "3) Observe the admin configuration payload.",
+                 "Authorization check is enforced in the UI only; the API trusts the session's role "
+                 "claim from a client-settable header. Reproduced against the lab image, not "
+                 "production.",
+                 None, _fingerprint(review_target, review_vuln, None), db.utcnow()))
+            out["exploitability_reviews"] = 1
+
+        if not db.one(conn, "SELECT id FROM attack_chains LIMIT 1"):
+            steps = [
+                {"order": 1, "action": "Upload a crafted profile image to the avatar endpoint",
+                 "vuln_id": review_vuln["id"], "impact": "medium",
+                 "precondition": "Authenticated low-priv account",
+                 "evidence": "Lab request/response captured in the review above."},
+                {"order": 2, "action": "Use the parser's file write to drop a template, then request it",
+                 "vuln_id": review_vuln["id"], "impact": "high",
+                 "precondition": "Step 1 succeeded and the templates directory is web-reachable",
+                 "evidence": "Lab-only: template rendered server-side with our marker."},
+            ]
+            conn.execute(
+                "INSERT INTO attack_chains (exercise_id, title, entry_point, trust_boundary, steps, "
+                "combined_impact, status, escalation_note, rationale, meta, created_by, created_at, updated_at) "
+                "VALUES (?, ?, 'authenticated low-privilege user', 'user->server', ?, 'high', 'validated', ?, ?, ?, "
+                "'iris', ?, ?)",
+                (exercise_id, "Low-priv upload -> template write -> server-side execution",
+                 db.jdump(steps),
+                 "Neither step is critical alone: the upload only reaches a parser and the template write "
+                 "needs the parser's output. Chained, they cross the user->server boundary.",
+                 "Demonstrated end-to-end in the authorized CTF range; each step carries its own evidence.",
+                 db.jdump({"targets": [review_target], "range": "lab"}),
+                 db.utcnow(), db.utcnow()))
+            out["attack_chains"] = 1
+
+    # ---- reports: two real artefacts with provenance, and two schedules
+    from ..services.report import ReportBuilder
+    if not db.one(conn, "SELECT id FROM reports LIMIT 1"):
+        builder = ReportBuilder(conn)
+        made = 0
+        for kind, title, filters in (
+                ("overview", "Demo overview report", {}),
+                ("soc", "Demo SOC triage report", {"severity": "high"})):
+            try:
+                builder.build(kind, filters, "admin", title=title)
+                made += 1
+            except Exception as exc:  # pragma: no cover - seed must never crash the install
+                out.setdefault("report_errors", []).append(f"{kind}: {exc}")
+        out["reports"] = made
+
+    from ..services.scheduler import _plus_minutes
+    if not db.one(conn, "SELECT id FROM report_schedules LIMIT 1"):
+        schedules = [
+            ("soc", "Daily SOC summary", {}, 1440, "active", None),
+            ("vulns", "Weekly vulnerability posture", {}, 10080, "paused", iso(now - timedelta(days=3))),
+        ]
+        for kind, title, filters, interval, status, last_run in schedules:
+            conn.execute(
+                "INSERT INTO report_schedules (kind, title, filters, interval_minutes, last_run_at, "
+                "next_run_at, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'admin', ?)",
+                (kind, title, db.jdump(filters), interval, last_run,
+                 _plus_minutes(iso(now), interval), status, db.utcnow()))
+        out["report_schedules"] = len(schedules)
+
+    # ---- a release decision record (append-only; docs/14 is the checklist)
+    if not db.one(conn, "SELECT id FROM releases LIMIT 1"):
+        import hashlib as _hashlib
+        # BASE_DIR is app/backend; the repo root is two levels up.
+        checklist = Path(__file__).resolve().parents[4] / "docs" / "14-release-checklist.md"
+        checklist_sha = (_hashlib.sha256(checklist.read_bytes()).hexdigest()
+                         if checklist.exists() else "0" * 64)
+        conn.execute(
+            "INSERT INTO releases (version, commit_sha, checklist_sha256, decision, decided_by, comment, "
+            "created_at) VALUES ('1.0.0', ?, ?, 'approved', 'admin', ?, ?)",
+            ("7263370", checklist_sha,
+             "Synthetic lab release record seeded for the demo (see docs/14).", db.utcnow()))
+        out["releases"] = 1
+
+    conn.commit()
+    record_audit(conn, SYSTEM, "seed.lab_extras", detail=out)
+    return out
+
+
 if __name__ == "__main__":
     conn = db.raw_connection()
     out = seed_all(conn)
@@ -526,5 +692,7 @@ if __name__ == "__main__":
             raised = _run_detections(conn, events, threshold_context=events)
             out["alerts"] = len(raised)
         out["demo_case"] = demo_case_and_evidence(conn)
+        # SEC-114: reports/schedules/tradecraft/lab targets/release/saved searches.
+        out["lab_extras"] = seed_lab_extras(conn)
     conn.close()
     print(json.dumps(out, indent=2))

@@ -36,10 +36,11 @@ The backend serves `dist/` automatically when it exists
 | `Cloud` | `/api/cloud/assets`, `/posture` | Cloud asset inventory, posture findings with full-body PATCH |
 | `Grc` | `/api/grc/controls*`, `/risks*` | Control status + evidence, risk register with likelihood×impact score recomputation |
 | `Exercises` | `/api/exercises*` | Authorized red-team/CTF flows: planned→authorized→running→completed (reason required on completion); detail modal with run log |
+| `Lab` | `/api/lab/*` | Range registry: targets with kind/exposure/status, the four coverage counters, per-target scope and the cross-checks (SEC-115) |
 | `Agents` | `/api/agents*` | Pending approval queue with approve/reject + comment, task queue with tool-call trace, agent allowlists, tool registry, evals runner |
 | `Automation` | `/api/automation*` | Playbook list with **dry run** (plan preview, nothing executes) and gated run, execution history |
 | `Reports` | `/api/reports*` | Generated reports with input row count + `input_sha256` provenance; kind filter; download (requires `reports.generate`) |
-| `Admin` | `/api/admin/*`, `/api/auth/users*` | Tabs: audit log (hash-chain verify banner, filters, pager) · users (roles, deactivation) · integrations + health · feature flags · backup/restore (typed `RESTORE` confirm) |
+| `Admin` | `/api/admin/*`, `/api/auth/users*` | Tabs: self-diagnosis (doctor verdict, read-only) · audit log (hash-chain verify banner, filters, pager) · users (roles, deactivation) · integrations + health · feature flags · backup/restore (typed `RESTORE` confirm) |
 
 ## Shell & safety conventions
 

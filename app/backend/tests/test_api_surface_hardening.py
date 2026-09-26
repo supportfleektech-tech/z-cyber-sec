@@ -386,3 +386,52 @@ def test_integrity_errors_map_to_documented_codes():
         detail = json.loads(resp.body)["detail"]
         assert detail["code"] == code and detail["fields"] == fields, message
         assert "constraint failed" not in detail["message"]  # no SQL echoed
+
+
+def test_baseline_security_headers_are_set_in_the_application(client):
+    """SEC-117: the hardening headers existed only in the Caddyfile, so any
+    deployment without that edge (an internal operator host, a hand-started
+    uvicorn, a staging stack behind another proxy) served the SPA with no framing,
+    MIME-sniffing or referrer policy at all."""
+    r = client.get("/api/healthz")
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    csp = r.headers["Content-Security-Policy"]
+    assert "default-src 'self'" in csp and "frame-ancestors 'none'" in csp
+    assert "object-src 'none'" in csp
+    assert "Permissions-Policy" in r.headers
+    # HSTS would pin a browser to https for the loopback preview host, so it is
+    # sent only when the request actually arrived over TLS.
+    assert "Strict-Transport-Security" not in r.headers
+    r = client.get("/api/healthz", headers={"x-forwarded-proto": "https"})
+    assert r.headers["Strict-Transport-Security"].startswith("max-age=")
+
+
+def test_doctor_reports_a_verdict_and_never_crashes(client, seeded):
+    """SEC-116: "is this install healthy?" required knowing which of six pages and
+    endpoints to look at. The doctor aggregates them; it is read-only and must
+    always answer, whatever state the data is in."""
+    body = client.get("/api/admin/doctor").json()
+    assert body["verdict"] in ("ok", "warn", "fail")
+    names = {c["check"] for c in body["checks"]}
+    assert {"database.migrations", "audit.chain", "backup.freshness", "env.guards"} <= names
+    assert body["summary"]["checks"] == len(body["checks"])
+    assert body["summary"]["ok"] + body["summary"]["warn"] + body["summary"]["fail"] == len(body["checks"])
+    assert "Read-only" in body["note"]
+    for c in body["checks"]:
+        assert c["status"] in ("ok", "warn", "fail")
+        if c["status"] != "ok":
+            assert c.get("fix_hint"), f"{c['check']} failed without a fix hint"
+    # The audit chain must verify on a healthy install, and the migration set must
+    # be fully applied — those two are the doctor's own acceptance criteria.
+    chain = next(c for c in body["checks"] if c["check"] == "audit.chain")
+    assert chain["status"] == "ok"
+    migrations = next(c for c in body["checks"] if c["check"] == "database.migrations")
+    assert migrations["status"] == "ok" and migrations["detail"]["pending"] == []
+
+def test_doctor_is_privileged(viewer_client):
+    """The doctor exposes environment and posture detail, so it sits behind
+    `audit.read` like the rest of /api/admin."""
+    r = viewer_client.get("/api/admin/doctor")
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "forbidden"

@@ -88,10 +88,24 @@ infra/                   # README + local compose, target-host network matrix, p
   `.env.example` committed, boot guard refuses dev defaults outside
   `LOCAL`/`LAB` (ADR-006).
 
+## Smoke check (running instance)
+
+With the app up (`.venv/bin/uvicorn app.main:app --port 8080`), one command answers
+"is this surface healthy and locked down?":
+
+```bash
+cd app/backend && .venv/bin/python -m scripts.smoke_check      # 214 checks, exits non-zero on any failure
+```
+
+It walks the live OpenAPI document, fills path parameters from real rows, and asserts
+every read route answers for an admin, every route answers 401 unauthenticated, and a
+viewer gets 403 on every consequential write — see docs/13 (SEC-114b) and
+`GET /api/admin/doctor` for the in-app equivalent.
+
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q          # 300 tests
+cd app/backend && .venv/bin/python -m pytest -q          # 305 tests
 cd app/backend && .venv/bin/ruff check app/ scripts/ tests/
 cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
 cd app/frontend && npm run build                         # tsc -b && vite build
@@ -122,6 +136,7 @@ secrets (gitleaks), backend (ruff + rule lint + pytest), frontend
 | [14](docs/14-release-checklist.md) | Release checklist & human approval gate (SEC-064) |
 | [15](docs/15-detection-rules.md) | Detection rule subset, validation & Sigma porting guide (SEC-074) |
 | [16](docs/16-adversary-tradecraft.md) | Adversary tradecraft — The-Xploiter persona, scope guard, chains, triage reporting (SEC-075) |
+| [17](docs/17-lab-range.md) | Lab range — registered training targets, coverage cross-checks, isolation rules (SEC-115) |
 | [ADR 001–008](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production, capacity/extraction |
 
 Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·

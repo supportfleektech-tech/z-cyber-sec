@@ -431,3 +431,102 @@ def test_failing_schedule_is_recorded_and_retried_on_cadence(client, conn):
     row = conn.execute("SELECT * FROM report_schedules WHERE id = ?", (ok["id"],)).fetchone()
     assert row["failures"] == 0 and row["last_error"] is None
     assert row["next_run_at"] > db.utcnow()
+
+
+# ------------------------------------------------------------- lab range (SEC-115)
+
+def _register(client, name, endpoint, **extra):
+    return client.post("/api/lab/targets", json={"name": name, "endpoint": endpoint, **extra})
+
+
+def test_lab_targets_are_registered_validated_and_scoped(client, seeded, conn):
+    """SEC-115: exercises authorize *targets*, but nothing recorded which targets
+    exist — an authorization could name a host no container ever served, and
+    nothing could tell "authorized but not up" from "up but not authorized"."""
+    assert _register(client, "lab-juice-01", "lab-juice-01:3000", kind="web", exposure="high").status_code == 201
+    ctf = _register(client, "lab-ctf-target-01", "lab-ctf-target-01:80", kind="web").json()
+    api = _register(client, "lab-api-01", "lab-api-01:8001", kind="api").json()
+    assert client.get("/api/lab/targets").json()["total"] == 3
+
+    # A target is registered once; its endpoint must be interior to the lab.
+    r = _register(client, "lab-juice-01", "lab-juice-01:3000")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "duplicate"
+    r = _register(client, "lab-other", "lab-juice-01:3000")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "duplicate_endpoint"
+    for bad in ("https://evil.example/", "127.0.0.1:3000", "juice.example.com:3000",
+                "lab-web-01:8080/admin", "localhost:8080"):
+        r = _register(client, "lab-probe", bad)
+        assert r.status_code == 400, f"{bad}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] == "bad_endpoint"
+    for field, value in (("kind", "banana"), ("exposure", "spicy")):
+        r = _register(client, "lab-probe", "lab-probe:80", **{field: value})
+        assert r.status_code == 400 and r.json()["detail"]["allowed"], f"{field}={value}"
+
+    # A target an active exercise authorizes cannot be retired out from under it.
+    # Authorization is an explicit act: creation starts `planned` (SEC-107), so the
+    # exercise is authorized through the lifecycle the platform actually enforces.
+    exercise = client.post("/api/exercises", json={
+        "name": "Range validation run", "scope": "Authorized run of the local training range.",
+        "owner": "iris", "targets": ["lab-ctf-target-01"],
+        "starts_at": "2026-01-01", "ends_at": "2030-01-01"}).json()
+    assert exercise["status"] == "planned"
+    exercise = client.patch(f"/api/exercises/{exercise['id']}", json={"status": "authorized"}).json()
+    assert exercise["status"] == "authorized"
+    conn.execute("UPDATE lab_targets SET status = 'running' WHERE id = ?", (ctf["id"],))
+    conn.commit()
+    r = client.patch(f"/api/lab/targets/{ctf['id']}", json={"status": "retired"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "target_in_use"
+    assert "Range validation run" in r.json()["detail"]["message"]  # names the holder
+    assert client.patch(f"/api/lab/targets/{ctf['id']}", json={"status": "stopped"}).json()["status"] == "stopped"
+    # An unknown target id, an empty patch and a bad status are the documented errors.
+    assert client.patch("/api/lab/targets/9999", json={"status": "running"}).status_code == 404
+    assert client.patch(f"/api/lab/targets/{ctf['id']}", json={}).status_code == 400
+    r = client.patch(f"/api/lab/targets/{ctf['id']}", json={"status": "banana"})
+    assert r.status_code == 400 and r.json()["detail"]["allowed"]
+    assert client.patch(f"/api/lab/targets/{api['id']}", json={"exposure": "critical"}).json()["exposure"] == "critical"
+
+
+def test_lab_coverage_flags_dangling_and_unauthorized(client, seeded, conn):
+    """The cross-check that makes the registry worth having: an authorization that
+    names an unregistered target (`authorizations_with_no_target`) is a written
+    authority pointing at nothing, and a running target nobody authorized is scope
+    drift. Both are surfaced instead of being invisible."""
+    api = _register(client, "lab-api-01", "lab-api-01:8001", kind="api").json()
+    conn.execute("UPDATE lab_targets SET status = 'running' WHERE id = ?", (api["id"],))
+    conn.commit()
+    cov = client.get("/api/lab/coverage").json()
+    assert cov["ok"] is False
+    assert any(t["name"] == "lab-api-01" for t in cov["running_but_not_authorized"])
+
+    # Authorize it inside a windowed exercise: the drift clears.
+    exercise = client.post("/api/exercises", json={
+        "name": "Range validation run", "scope": "Authorized run of the local training range.",
+        "owner": "iris", "targets": ["lab-api-01"],
+        "starts_at": "2026-01-01", "ends_at": "2030-01-01"}).json()
+    exercise = client.patch(f"/api/exercises/{exercise['id']}", json={"status": "authorized"}).json()
+    assert exercise["status"] == "authorized"
+    cov = client.get("/api/lab/coverage").json()
+    assert cov["ok"] is True
+    # ...and an authorization that targets something which is not a range host (the
+    # seeded phishing drill authorizes two mailboxes) is informational, not an error:
+    # a check that cries wolf is a check someone turns off.
+    assert cov["authorizations_with_no_target"] == []
+    assert any(t["target"].endswith("@test.local") for t in cov["other_authorized_targets"])
+    entry = next(t for t in cov["targets"] if t["name"] == "lab-api-01")
+    assert entry["in_scope"] is True and entry["authorized_by"][0]["exercise_id"] == exercise["id"]
+    assert cov["running_but_not_authorized"] == []
+
+    # An authorization naming an unregistered target is reported, not ignored —
+    # and an authorized target that is not running is a session that will fail.
+    ghost = client.post("/api/exercises", json={
+        "name": "Dangling scope run", "scope": "Authorized run naming a target nobody registered.",
+        "owner": "iris", "targets": ["lab-ghost-01"],
+        "starts_at": "2026-01-01", "ends_at": "2030-01-01"}).json()
+    client.patch(f"/api/exercises/{ghost['id']}", json={"status": "authorized"})
+    conn.execute("UPDATE lab_targets SET status = 'stopped' WHERE id = ?", (api["id"],))
+    conn.commit()
+    cov = client.get("/api/lab/coverage").json()
+    assert any(d["target"] == "lab-ghost-01" for d in cov["authorizations_with_no_target"])
+    assert any(t["name"] == "lab-api-01" for t in cov["authorized_but_not_running"])
+    assert cov["ok"] is False

@@ -1,8 +1,10 @@
 """Admin: integrations, feature flags, settings, audit log, backups."""
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -199,6 +201,153 @@ def get_anchor(conn: sqlite3.Connection = Depends(db.get_conn),
     """
     from ..audit import anchor as read_anchor
     return {"anchor": read_anchor(conn), "verify": verify_chain(conn)}
+
+
+# --------------------------------------------------------------------- doctor
+
+@router.get("/doctor")
+def doctor(conn: sqlite3.Connection = Depends(db.get_conn),
+           user: dict = Depends(require("audit.read"))):
+    """One-shot self-diagnosis for an operator (SEC-116).
+
+    Every check below existed separately — migrations, the audit chain, the
+    scheduler, backups, the range, the environment — and each had to be reached
+    through a different page or endpoint, so "is this install healthy?" was
+    answerable only by someone who already knew where to look. This aggregates
+    them into one verdict with per-check status, the values behind it and the
+    command to run when something is wrong.
+
+    Read-only by construction: nothing here writes, retries or repairs. Every
+    finding names a `fix_hint`.
+    """
+    from ..audit import anchor as read_anchor
+    from ..audit import verify_chain
+
+    checks: list[dict] = []
+
+    def check(name: str, status: str, detail, fix_hint: str | None = None) -> None:
+        checks.append({"check": name, "status": status, "detail": detail, "fix_hint": fix_hint})
+
+    # --- database + migrations
+    try:
+        applied = db.q(conn, "SELECT name, applied_at FROM schema_migrations ORDER BY name")
+    except Exception as exc:
+        applied = []
+        check("database.migrations", "fail", {"error": str(exc)},
+              "the database is unreadable — restore from the last verified backup (docs/10)")
+    if applied:
+        migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+        on_disk = sorted(f.name for f in migrations_dir.glob("*.sql"))
+        missing = [m for m in on_disk if m not in {r["name"] for r in applied}]
+        check("database.migrations", "fail" if missing else "ok",
+              {"applied": len(applied), "latest": applied[-1]["name"], "pending": missing},
+              "restart the app to apply pending migrations" if missing else None)
+
+    # --- audit chain + anchor
+    verdict = verify_chain(conn)
+    head = read_anchor(conn)
+    check("audit.chain", "ok" if verdict.get("ok") else "fail",
+          {"ok": verdict.get("ok"), "rows": verdict.get("rows"),
+           "head_seq": head.get("seq"), "reason": verdict.get("reason")},
+          "do NOT delete audit rows; compare against the last exported anchor and escalate (docs/10)")
+
+    # --- counters the operator would otherwise eyeball one page at a time
+    open_alerts = db.one(conn, "SELECT COUNT(*) c FROM alerts WHERE status NOT IN ('closed','dismissed')")["c"]
+    stale = db.one(conn, "SELECT COUNT(*) c FROM report_schedules WHERE status='active' AND "
+                         "failures > 0")["c"]
+    check("reports.schedules", "warn" if stale else "ok",
+          {"active_with_failures": stale,
+           "next_due": (db.one(conn, "SELECT MIN(next_run_at) m FROM report_schedules WHERE status='active'")
+                        or {}).get("m")},
+          "inspect /api/reports/schedules for last_error, then fix the template or filters")
+
+    # --- sessions (SEC-105 semantics: expired rows are not active)
+    sessions = db.one(conn, "SELECT COUNT(*) c FROM sessions WHERE expires_at > ?", (db.utcnow(),))["c"]
+    expired = db.one(conn, "SELECT COUNT(*) c FROM sessions WHERE expires_at <= ?", (db.utcnow(),))["c"]
+    check("sessions", "ok", {"active": sessions, "expired_rows": expired, "open_alerts": open_alerts})
+
+    # --- backups: present, recent, verifiable
+    backups = sorted(settings.backups_dir.glob("*.tar.gz"), key=lambda f: f.stat().st_mtime, reverse=True)
+    newest = backups[0] if backups else None
+    if not backup_recent(newest):
+        check("backup.freshness", "fail",
+              {"backups": len(backups), "newest": newest.name if newest else None},
+              "create one: POST /api/admin/backup, then verify it (docs/10 Weekly drill)")
+    else:
+        check("backup.freshness", "ok",
+              {"backups": len(backups), "newest": newest.name,
+               "age_hours": round((time.time() - newest.stat().st_mtime) / 3600, 1)})
+
+    # --- data directories writable (evidence upload, reports, backups)
+    for label, path in (("data.evidence_dir", settings.evidence_dir),
+                        ("data.reports_dir", settings.reports_dir),
+                        ("data.backups_dir", settings.backups_dir)):
+        writable = os.access(path, os.W_OK) if path.exists() else False
+        check(label, "ok" if writable else "fail", {"path": str(path), "exists": path.exists()},
+              f"create it and grant the service account write access: mkdir -p {path}")
+
+    # --- environment + the guards that depend on it
+    check("env.guards", "ok" if settings.env_name in ("STAGING", "PROD") or settings.secret_key
+          else "warn",
+          {"env": settings.env_name, "secret_key_is_default": settings.secret_key == "dev-only-change-me-in-staging",
+           "login_rate_limit": settings.login_rate_limit_enabled,
+           "metrics_token_set": bool(settings.metrics_token)},
+          "STAGING/PROD refuse to boot with a weak SECRET_KEY (ADR-006); set METRICS_TOKEN and "
+          "LOGIN_RATE_LIMIT_ENABLED=1 before exposing the app")
+
+    # --- lab range cross-check (SEC-115)
+    try:
+        from .lab import _looks_like_lab_target
+        targets = {r["name"]: r["status"] for r in db.q(conn, "SELECT name, status FROM lab_targets")}
+        if targets:
+            drift, dangling = [], []
+            for ex in db.q(conn, "SELECT name, status, targets FROM exercises "
+                                 "WHERE status IN ('authorized', 'running')"):
+                for name in db.jload(ex["targets"], []) or []:
+                    if name not in targets and _looks_like_lab_target(name):
+                        dangling.append(name)
+            for name, status in targets.items():
+                if status == "running" and not db.one(
+                        conn, "SELECT id FROM exercises WHERE status IN ('authorized','running') "
+                              "AND targets LIKE ?", (f'%"{name}"%',)):
+                    drift.append(name)
+            check("lab.range", "fail" if (drift or dangling) else "ok",
+                  {"registered": len(targets), "running_but_not_authorized": drift,
+                   "authorized_but_not_registered": dangling},
+                  "GET /api/lab/coverage explains both; register the target or authorize it")
+        else:
+            check("lab.range", "warn", {"registered": 0},
+                  "no range targets registered — see docs/17 and infra/lab/docker-compose.yml")
+    except Exception as exc:  # a diagnostic must never be the thing that breaks
+        check("lab.range", "warn", {"error": str(exc)})
+
+    # --- agent governance: are the eval results in place?
+    agents = db.one(conn, "SELECT COUNT(*) c FROM agents")["c"]
+    check("agents", "ok" if agents else "warn", {"agents": agents},
+          "register an agent and run the governance evals: POST /api/agents/evals/run")
+
+    failed = [c for c in checks if c["status"] == "fail"]
+    warned = [c for c in checks if c["status"] == "warn"]
+    return {
+        "env": settings.env_name,
+        "version": (db.one(conn, "SELECT value FROM settings WHERE key = 'platform_version'") or {})
+                   .get("value"),
+        "generated_at": db.utcnow(),
+        "verdict": "fail" if failed else ("warn" if warned else "ok"),
+        "summary": {"checks": len(checks), "ok": len(checks) - len(failed) - len(warned),
+                    "warn": len(warned), "fail": len(failed)},
+        "checks": checks,
+        "note": ("Read-only diagnosis: nothing here writes, retries or repairs. Each failing "
+                 "check's `fix_hint` is the action; `docs/10-operations-runbook.md` is the "
+                 "procedure it belongs to."),
+    }
+
+
+def backup_recent(newest, max_age_hours: float = 48.0) -> bool:
+    """A backup older than two days does not satisfy the restore drill cadence."""
+    if newest is None:
+        return False
+    return (time.time() - newest.stat().st_mtime) <= max_age_hours * 3600
 
 
 # -------------------------------------------------------------------- backup

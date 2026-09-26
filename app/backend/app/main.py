@@ -29,6 +29,7 @@ from .routers import (
     exercises,
     grc,
     intel,
+    lab,
     overview,
     reports,
     soc,
@@ -40,8 +41,17 @@ API_ROUTERS = [
     overview.router, auth.router, soc.router, cases.router, intel.router, vulns.router,
     appsec.router, cloud.router, grc.router, exercises.router, agents.router,
     automation.router, reports.router, admin.router, assets.router,
-    tradecraft.router,
+    tradecraft.router, lab.router,
 ]
+
+
+# SEC-117: the SPA is a Vite build served by this process, so the policy can be
+# tight — no inline scripts, no external origins, no framing. `style-src
+# 'unsafe-inline'` is required by the bundled component styles (a nonce would mean
+# rewriting the build); everything else is `'self'`.
+_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+        "object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 
 
 def create_app() -> FastAPI:
@@ -135,6 +145,23 @@ def create_app() -> FastAPI:
         if settings.env_name != "PROD":
             response.headers["X-Environment"] = settings.env_name
             response.headers["X-Data-Class"] = "synthetic-by-default"
+        # SEC-117: the baseline hardening headers belong in the application, not
+        # only in the Caddyfile. A deployment that skips the edge (an internal
+        # operator host, a staging stack behind someone else's proxy, `uvicorn`
+        # started by hand) otherwise serves the SPA with no framing, MIME-sniffing
+        # or referrer policy at all. The edge may override these; it can no longer
+        # be the only place they exist.
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Content-Security-Policy", _CSP)
+        response.headers.setdefault("Permissions-Policy",
+                                    "geolocation=(), camera=(), microphone=(), payment=()")
+        # HSTS is meaningful only over TLS: sending it from a plain-HTTP lab would
+        # pin browsers to https for the loopback host and break the local preview.
+        if request.url.scheme == "https":
+            response.headers.setdefault("Strict-Transport-Security",
+                                        "max-age=31536000; includeSubDomains")
         return response
 
     for r in API_ROUTERS:

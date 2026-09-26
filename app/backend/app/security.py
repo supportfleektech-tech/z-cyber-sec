@@ -107,6 +107,10 @@ ALL_READ = {
     "appsec.read", "cloud.read", "grc.read", "exercises.read", "reports.read",
     "assets.read", "agents.read", "automation.read", "release.read",
     "tradecraft.read",
+    # SEC-115: the range registry is posture data every role may read (which
+    # targets exist, which are up, which are authorized); registering/modifying
+    # them is an infrastructure act, so it sits with the other write grants.
+    "lab.read",
 }
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -124,14 +128,14 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "soc.write", "cases.write", "evidence.upload", "evidence.download",
         "intel.write", "vulns.write", "appsec.write", "reports.generate",
         "exercises.write", "automation.write", "automation.run",
-        "agents.approve", "agents.task", "tradecraft.write",
+        "agents.approve", "agents.task", "tradecraft.write", "lab.write",
     },
     "admin": set(ALL_READ) | {
         "soc.write", "cases.write", "evidence.upload", "evidence.download",
         "intel.write", "vulns.write", "appsec.write", "cloud.write",
         "grc.write", "exercises.write", "reports.generate", "assets.write",
         "automation.write", "automation.run", "agents.manage", "agents.approve",
-        "agents.task", "rules.write", "admin.users", "admin.integrations",
+        "agents.task", "rules.write", "admin.users", "admin.integrations", "lab.write",
         "admin.flags", "admin.backup", "audit.read", "release.write",
         "tradecraft.write",
     },

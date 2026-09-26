@@ -1,0 +1,76 @@
+# CYBER-SEC local training range (SEC-115).
+#
+# The deliberately vulnerable half of the lab. Two rules drive this file:
+#
+#   1. **Isolation.** Everything here joins `lab_range`, a docker network with
+#      `internal: true`, so containers can reach each other and nothing else —
+#      no route off the host, no access to the platform network (`cyber-sec`),
+#      no access to real data. The platform itself is never on this network.
+#   2. **No host exposure.** Ports are published to `127.0.0.1` only, so even on
+#      the host the targets are reachable from a browser at a loopback address
+#      and from nowhere else. Never change this to `0.0.0.0` "to test from
+#      another machine": that is the one edit that turns a lab into an incident.
+#
+# Use it in three steps:
+#
+#   docker compose -f infra/lab/docker-compose.yml up -d
+#   # register what you started (names must match `exercises.targets`)
+#   #   POST /api/lab/targets  {"name": "lab-juice-01", "kind": "web",
+#   #                           "endpoint": "lab-juice-01:3000", "exposure": "high"}
+#   # authorize it in an exercise with a window, then verify the cross-check:
+#   #   GET /api/lab/coverage        -> authorized_but_not_running / running_but_not_authorized
+#
+# Tear down with `docker compose -f infra/lab/docker-compose.yml down`.
+# `docker compose --profile <name> up` starts a single stack if you prefer less
+# surface: profiles are `juice`, `ctf`, `api`.
+name: cyber-sec-lab-range
+
+services:
+  # OWASP Juice Shop — the AppSec practice target.
+  lab-juice-01:
+    image: bkimminich/juice-shop:latest
+    profiles: ["juice"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [lab_range]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    # Vulnerable by design: no healthcheck that could imply it is safe to expose.
+
+  # A second web target for CTF-style exercises (OWASP-style challenges).
+  lab-ctf-target-01:
+    image: vulnerables/web-dvwa:latest
+    profiles: ["ctf"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:80"
+    environment:
+      # The image's default credentials, lab-only, documented in docs/17.
+      MYSQL_PASS: "labonly"
+    networks: [lab_range]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+
+  # A small intentionally-broken API for authz/IDOR exercises. Built here so the
+  # range does not depend on an unpublished image: it is a handful of endpoints
+  # with the classic mistakes, and nothing else.
+  lab-api-01:
+    image: python:3.11-alpine
+    profiles: ["api"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8001"
+    networks: [lab_range]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    working_dir: /app
+    volumes:
+      - ./api:/app:ro
+    command: ["python", "-m", "labapi", "--port", "8001"]
+
+networks:
+  lab_range:
+    # internal: true = no gateway off this bridge. Containers see each other and
+    # nothing else; the only way in is the loopback port publish above.
+    internal: true

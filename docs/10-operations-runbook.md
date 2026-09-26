@@ -4,7 +4,14 @@ Cadence + concrete procedures. All commands assume the repo root as CWD
 unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
 
 ## Daily
-- Health: `GET /api/healthz` (200) + `GET /metrics`; disk headroom on the
+- Health, one call: `GET /api/admin/doctor` (SEC-116) → `verdict` plus eleven
+  checks (migrations, audit chain, scheduler failures, sessions, backup
+  freshness, directory permissions, environment guards, range cross-check,
+  agents), each with the values behind it and a `fix_hint` naming the action.
+  It is read-only — it never writes, retries or repairs — and the Admin page's
+  default tab renders it. On a fresh install `backup.freshness` is the one that
+  fails first; create a backup with `POST /api/admin/backup` and re-run.
+- Health (raw): `GET /api/healthz` (200) + `GET /metrics`; disk headroom on the
   data volume; alert pipeline (`/api/soc/alerts?status=new`). Dismissals carry a
   note by design (SEC-081) — when reviewing the queue, `notes` is where the
   false-positive reasoning lives, so a dismissal without one cannot happen.
@@ -17,12 +24,20 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
 - Audit: `GET /api/admin/audit` — scan for `auth.failed` bursts,
   `auth.rate_limited` (login brute-force), `agent_tool_denied`, `release.*`.
 - Chain: `GET /api/admin/audit/verify` → `ok: true` (tamper evidence).
+- Range: `GET /api/lab/coverage` → `ok: true`. `running_but_not_authorized`
+  non-empty is scope drift (fix scope or stop the container);
+  `authorized_but_not_running` means today's session will fail against a target
+  nobody started. Both are covered by the doctor's `lab.range` check.
 - Backup: confirm today's backup exists in `data/backups/` (or the backup
   job's output) and note its `sha256`.
 
 ## Weekly
 - Access: `GET /api/auth/users` — role changes, stale accounts; agent
   allowlists (`GET /api/agents`).
+- Surface: `python -m scripts.smoke_check` against the running instance (204
+  checks: every read route for an admin, every route unauthenticated, twelve
+  consequential writes as a viewer) — the same assertions CI runs, from the
+  operator's side.
 - Supply chain: review CI runs — gitleaks findings, `pip-audit`/`npm audit`
   output, SBOM artifact diff.
 - Audit anchor: `GET /api/admin/audit/verify` must be `ok: true` (a

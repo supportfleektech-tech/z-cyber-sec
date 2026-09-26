@@ -533,6 +533,38 @@ platform does not control: the copy is the control. A keyed HMAC chain (key held
 outside the database) is the natural next hardening — **Proposed**, not
 implemented.
 
+## Lab range (`/api/lab`)
+
+`GET/POST /targets` · `PATCH /targets/{id}` · `GET /coverage` (SEC-115).
+
+The registry of training-range targets — the other half of what an exercise
+authorizes. `targets[].name` is what `exercises.targets` lists; `endpoint` must be
+interior to the lab (`lab-*.lab`, `host:port`; a scheme, path, loopback address or
+public name is `400 bad_endpoint`). `kind` ∈ `{web, api, network, host, cloud}`,
+`exposure` ∈ `{critical, high, medium, low}`, `status` ∈
+`{registered, running, stopped, retired}`; retiring a target an active exercise still
+authorizes is `409 target_in_use` naming the holder.
+
+`GET /coverage` is the cross-check the registry exists for:
+`authorized_but_not_running` (the exercise is live, the target is down — a session
+that will fail), `running_but_not_authorized` (scope drift), and
+`authorizations_with_no_target` (names that read like range targets but are not
+registered). `other_authorized_targets` lists authorizations that are legitimately
+*not* containers (mailboxes, vendor hosts) and does not affect `ok`.
+
+## Operations
+
+`GET /api/admin/doctor` (admin `audit.read`) — one read-only verdict over migrations,
+the audit chain, scheduler failures, session counts, backup freshness, directory
+permissions, environment guards, the lab-range cross-check and the agent inventory.
+Each check carries the values behind it and a `fix_hint` naming the action; the
+response has `verdict`, `summary` and `checks[]` (SEC-116).
+
+Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer`, a tight `Content-Security-Policy` and
+`Permissions-Policy`; `Strict-Transport-Security` is added when the request arrived
+over TLS. The Caddy edge sets its own copies and can override these (SEC-117).
+
 ## Error code catalogue (common)
 
 | code | where |
@@ -548,6 +580,10 @@ implemented.
 | `bad_reference` | a referenced row does not exist (400, constraint net, SEC-109) |
 | `duplicate` | a unique value already exists (409, constraint net, SEC-109) |
 | `constraint_violation` | another data constraint (CHECK/…) refused the write (400, SEC-109) |
+| `bad_endpoint` | a lab target endpoint is not interior to the lab (400, SEC-115) |
+| `duplicate_endpoint` | another lab target already uses that endpoint (409, SEC-115) |
+| `target_in_use` | retiring a target an active exercise still authorizes (409, SEC-115) |
+| `bad_exposure` | exposure outside `{critical, high, medium, low}` (400, SEC-115) |
 | `no_changes` | PATCH with empty diff |
 | `missing` | report file gone |
 | `confirm_required` | restore without `confirm:"RESTORE"` |
