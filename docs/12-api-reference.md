@@ -262,6 +262,16 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Scan runs and SARIF import
+
+`POST /api/appsec/sarif` attaches findings to a scan run (deduplicated on run + rule +
+file + line) and updates the run's counters: `findings_total` is the number of findings
+attached to the run, and `findings_new` is what this import added; both are returned
+with `scan_run_id`. A run reported as `failed`/`cancelled` keeps that status when
+results arrive (the response says so in `note`); a `running` run advances to
+`completed`. Before SEC-106 `findings_total` was overwritten with the count created by
+the latest call — so a re-import zeroed it — and `findings_new` was never maintained.
+
 ## Metrics
 
 `GET /metrics` (Prometheus text format; optional `METRICS_TOKEN` bearer) reports counts

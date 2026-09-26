@@ -99,12 +99,31 @@ def import_sarif(body: SarifImportIn, conn: sqlite3.Connection = Depends(db.get_
                 "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
                 (run["id"], rule_id, severity, file_path, line, message[:2000], db.utcnow()))
             created += 1
-    conn.execute("UPDATE scan_runs SET findings_total = ?, status = 'completed' WHERE id = ?",
-                 (created, run["id"]))
+    # SEC-106: the run's counters must describe the run, not this call. Writing
+    # `findings_total = created` meant a re-import (idempotent, creates nothing)
+    # reset the total to 0 while the findings were still attached, and
+    # `findings_new` was never written at all (always 0). Also: an import used to
+    # overwrite the caller's reported `failed` status with `completed` — the
+    # platform rewriting the run's own lifecycle state.
+    total = int(db.one(conn, "SELECT COUNT(*) c FROM appsec_findings WHERE scan_run_id = ?",
+                       (run["id"],))["c"])
+    status_sql, status_param = "", []
+    if run["status"] not in ("failed", "cancelled"):
+        status_sql, status_param = ", status = 'completed'", []
+    conn.execute(f"UPDATE scan_runs SET findings_total = ?, findings_new = ?{status_sql} WHERE id = ?",
+                 (total, created, *status_param, run["id"]))
     conn.commit()
     record_audit(conn, _actor(user), "appsec.sarif.imported", target_type="scan_run",
-                 target_id=str(run["id"]), detail={"findings": created})
-    return {"imported": created, "scan_run_id": run["id"]}
+                 target_id=str(run["id"]),
+                 detail={"new_findings": created, "findings_total": total,
+                         "status": run["status"] if status_sql else "completed"})
+    out = {"imported": created, "scan_run_id": run["id"], "findings_total": total,
+           "findings_new": created}
+    if not status_sql:
+        out["status"] = run["status"]
+        out["note"] = (f"run stays '{run['status']}': importing results does not rewrite a "
+                       "status the caller reported")
+    return out
 
 
 @router.get("/findings")

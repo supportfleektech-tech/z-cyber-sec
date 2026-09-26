@@ -9,6 +9,9 @@ interface ScanRun {
   status: string;
   ci_url: string | null;
   created_at: string;
+  // SEC-106: these describe the run (total attached, added by the last import).
+  findings_total: number;
+  findings_new: number;
 }
 interface Finding {
   id: number;
@@ -50,7 +53,7 @@ export default function Appsec() {
         <LoadBlock loading={runs.loading} error={runs.error} empty={!runs.data?.items?.length}>
           <table className="tbl">
             <thead>
-              <tr><th>ID</th><th>Repo</th><th>Kind</th><th>Status</th><th>CI</th><th>Created</th></tr>
+              <tr><th>ID</th><th>Repo</th><th>Kind</th><th>Status</th><th>Findings</th><th>CI</th><th>Created</th></tr>
             </thead>
             <tbody>
               {runs.data!.items.map((r) => (
@@ -59,6 +62,9 @@ export default function Appsec() {
                   <td>{r.repo}</td>
                   <td className="dim">{r.kind}</td>
                   <td><StBadge value={r.status} /></td>
+                  <td className="dim" title="findings attached to this run / added by the last import">
+                    {r.findings_total ?? 0}{r.findings_new ? ` (+${r.findings_new})` : ""}
+                  </td>
                   <td className="dim mono">{r.ci_url || "—"}</td>
                   <td className="dim">{fmtTs(r.created_at)}</td>
                 </tr>

@@ -86,3 +86,54 @@ def test_scan_runs_listing(client, seeded):
     assert r.json()["total"] >= 1
     r = client.get("/api/appsec/scan-runs", params={"repo": "nope"})
     assert r.json()["total"] == 0
+
+
+def test_scan_run_counts_describe_the_run_not_the_last_import(client, seeded):
+    """SEC-106: `findings_total` was set to the number of findings *created by that
+    import call*, so re-importing the same SARIF (idempotent — it creates nothing)
+    reset the run's total to 0 while the findings stayed attached, and
+    `findings_new` was never written after creation. Live repro before the fix:
+    run 2 → import → `findings_total: 2`; import again → `findings_total: 0` with 2
+    findings still on the run."""
+    run = client.post("/api/appsec/scan-runs", json={"repo": "acme/api", "kind": "sast"}).json()
+    rid = run["id"]
+    assert run["findings_total"] == 0
+
+    first = client.post("/api/appsec/sarif", json={"scan_run_id": rid, "sarif": SARIF}).json()
+    assert first["imported"] >= 2
+    assert first["findings_total"] == first["imported"] == first["findings_new"]
+    row = next(r for r in client.get("/api/appsec/scan-runs").json()["items"] if r["id"] == rid)
+    assert row["findings_total"] == first["imported"] and row["findings_new"] == first["imported"]
+
+    # Re-import: nothing new, but the run's total must still describe the run.
+    again = client.post("/api/appsec/sarif", json={"scan_run_id": rid, "sarif": SARIF}).json()
+    assert again["imported"] == 0 and again["findings_new"] == 0
+    assert again["findings_total"] == first["imported"]
+    row = next(r for r in client.get("/api/appsec/scan-runs").json()["items"] if r["id"] == rid)
+    assert row["findings_total"] == first["imported"], "a re-import must not zero the run's total"
+
+    # The count also matches what the findings list says.
+    listed = client.get("/api/appsec/findings", params={"scan_run_id": rid}).json()["total"]
+    assert listed == row["findings_total"]
+
+
+def test_sarif_import_does_not_rewrite_a_reported_run_status(client, seeded):
+    """SEC-106: an import used to set `status = 'completed'` unconditionally, so a run
+    the CI reported as `failed` became `completed` the moment findings were uploaded —
+    the platform rewriting the run's own lifecycle state."""
+    run = client.post("/api/appsec/scan-runs", json={"repo": "acme/api", "kind": "sast",
+                                                    "status": "failed"}).json()
+    assert run["status"] == "failed"
+    out = client.post("/api/appsec/sarif", json={"scan_run_id": run["id"], "sarif": SARIF}).json()
+    assert out["status"] == "failed" and "failed" in out["note"]
+    row = next(r for r in client.get("/api/appsec/scan-runs").json()["items"] if r["id"] == run["id"])
+    assert row["status"] == "failed"
+    assert row["findings_total"] > 0        # the results are still recorded
+
+    # A run that was merely running does advance to completed.
+    running = client.post("/api/appsec/scan-runs", json={"repo": "acme/api", "kind": "sast",
+                                                        "status": "running"}).json()
+    assert client.post("/api/appsec/sarif",
+                       json={"scan_run_id": running["id"], "sarif": SARIF}).status_code == 201
+    row = next(r for r in client.get("/api/appsec/scan-runs").json()["items"] if r["id"] == running["id"])
+    assert row["status"] == "completed"

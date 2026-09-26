@@ -843,7 +843,7 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 285 → **287 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 287 → **289 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
@@ -851,13 +851,14 @@ an edited bundle is refused by the recorded hash, unknown provenance is reported
 gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
 round-trips and verifies, and the seeded evidence points at a real file) 282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
 positives) 284 → 285 (1 new: STIX imports validate confidence and normalise
-timestamps) and 285 → 287 (2 new: the labelled alert series counts only open alerts,
-and expired sessions are not active), ruff clean.
+timestamps) 285 → 287 (2 new: the labelled alert series counts only open alerts,
+and expired sessions are not active) and 287 → 289 (2 new: a scan run's counters
+describe the run, and an import does not rewrite a reported status), ruff clean.
 
-**Current totals:** **287 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **289 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
-(294.63 kB / 82.17 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-105 series was reproduced first (as a failing check or a live request) and
+(294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
+SEC-106 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1477,3 +1478,30 @@ active 0, expired 1; a fresh login → active 1.
 Follow-on in the same change: the stale rows were only ever removed when their token
 was presented again, so the table grew without bound. Logging in now drops that user's
 expired sessions (a moment nobody has to notice, and the only writer of them).
+
+### SEC-106 — a scan run's own counters described the last import, not the run (fixed)
+
+Found by reading what the AppSec SARIF import writes back to its `scan_runs` row.
+
+**Was (a):** `UPDATE scan_runs SET findings_total = ?` used the number of findings
+*created by that call*. Live repro: import → `findings_total: 2`; import the same file
+again (idempotent — it creates nothing) → `findings_total: 0` while both findings were
+still attached to the run. `findings_new` was written once, as `0`, and never updated,
+so it was permanently meaningless.
+
+**Was (b):** the same statement set `status = 'completed'` unconditionally, so a run the
+CI reported as `failed` became `completed` the moment results were uploaded — the
+platform rewriting the run's own lifecycle state.
+
+**Fixed:** after the import, `findings_total` is the run's actual attached count and
+`findings_new` is what this import added; the response carries both plus the run id. A
+run whose reported status is `failed`/`cancelled` keeps it (with a `note` saying why),
+while a `running` run still advances to `completed`; the audit detail now records
+`new_findings`, `findings_total` and the resulting status. The AppSec SPA shows a
+Findings column (`total (+new)`).
+
+**Live (after fix):** import 1 → `{imported: 2, findings_total: 2, findings_new: 2}` and
+the row agrees; import 2 → `{imported: 0, findings_total: 2, findings_new: 0}` with the
+findings list also reporting 2; a `failed` run stays `failed` with its findings recorded
+(`note: "run stays 'failed': importing results does not rewrite a status the caller
+reported"`), and a `running` run advances to `completed`.
