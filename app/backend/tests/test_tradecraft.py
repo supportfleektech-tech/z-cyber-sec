@@ -629,3 +629,64 @@ def test_analyst_can_record_a_review_but_scope_still_applies(analyst_client, see
 def test_tradecraft_endpoints_require_a_session(client, seeded, path):
     client.post("/api/auth/logout")
     assert client.get(path).status_code == 401
+
+
+def test_scope_change_is_audited_with_before_and_after(client, seeded, conn):
+    """SEC-107: `PATCH /api/exercises/{id}` recorded only `{status, reason}` in its
+    audit entry, so replacing `targets`, `owner`, `starts_at` or `ends_at` wrote an
+    audit row claiming nothing had changed — while `targets` is exactly what the
+    scope guard reads. Live repro before the fix: patching targets/owner/ends_at on
+    exercise 1 produced `exercise.updated {"reason": null, "status": null}`."""
+    before = conn.execute("SELECT MAX(seq) m FROM audit_events").fetchone()["m"]
+    r = client.patch("/api/exercises/1", json={"targets": ["10.10.10.10"], "owner": "new-owner",
+                                              "ends_at": "2030-01-01"})
+    assert r.status_code == 200, r.text
+    # SEC-091 class: the write path must decode JSON columns like the read path does.
+    assert isinstance(r.json()["targets"], list) and r.json()["targets"] == ["10.10.10.10"]
+    assert r.json()["owner"] == "new-owner"
+
+    entries = conn.execute("SELECT action, detail FROM audit_events WHERE seq > ? ORDER BY seq",
+                           (before,)).fetchall()
+    scope = [e for e in entries if e["action"] == "exercise.scope_changed"]
+    assert scope, f"expected an exercise.scope_changed audit entry, got {[(e['action'], e['detail']) for e in entries]}"
+    detail = json.loads(scope[0]["detail"])
+    assert set(detail["changed"]) == {"targets", "owner", "ends_at"}
+    assert detail["before_after"]["owner"]["to"] == "new-owner"
+    assert detail["before_after"]["ends_at"]["to"] == "2030-01-01"
+    assert detail["before_after"]["targets"]["to"] == ["10.10.10.10"]
+
+    # A non-scope change keeps the ordinary action, but still names the fields.
+    before = conn.execute("SELECT MAX(seq) m FROM audit_events").fetchone()["m"]
+    assert client.patch("/api/exercises/1", json={"meta": {"note": "x"}}).status_code == 200
+    entry = conn.execute("SELECT action, detail FROM audit_events WHERE seq > ? ORDER BY seq",
+                         (before,)).fetchall()[0]
+    assert entry["action"] == "exercise.updated" and "meta" in json.loads(entry["detail"])["changed"]
+
+
+def test_unreadable_window_is_refused_and_inert(client, seeded, conn):
+    """SEC-107: `_window_state` compares the first ten characters as strings, so
+    `ends_at: "banana"` sorted after today and the engagement read as *live* — an
+    authorization that never lapses, from a typo — and nothing validated the value on
+    the way in."""
+    # Refused where it is written.
+    r = client.patch("/api/exercises/1", json={"ends_at": "banana"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_window", r.text
+    assert client.patch("/api/exercises/1", json={"starts_at": "2026-13-45"}).status_code == 400
+    bad = client.post("/api/exercises", json={
+        "name": "Bad window", "owner": "platform", "ends_at": "soon",
+        "scope": "Synthetic window-validation drill, nothing is targeted."})
+    assert bad.status_code == 400 and bad.json()["detail"]["code"] == "bad_window", bad.text
+    # An inverted window is refused too.
+    r = client.patch("/api/exercises/1", json={"starts_at": "2026-05-01", "ends_at": "2026-04-01"})
+    assert r.status_code == 400 and "before" in r.json()["detail"]["message"]
+
+    # And a window that is somehow already stored unreadable is inert, not live.
+    conn.execute("UPDATE exercises SET starts_at = NULL, ends_at = 'banana', status = 'authorized', "
+                 "targets = ? WHERE id = 1", (json.dumps(["test1@test.local"]),))
+    conn.commit()
+    decision = tradecraft.check_target(conn, "test1@test.local")
+    assert decision["in_scope"] is False
+    assert "unreadable" in decision["reason"]
+    rows = tradecraft.authorized_targets(conn)
+    entry = next(r for r in rows if r["target"] == "test1@test.local")
+    assert entry["usable"] is False and entry["window_state"] == "invalid"

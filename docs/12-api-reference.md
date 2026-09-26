@@ -262,6 +262,22 @@ refuses a run that is waiting on human approvals (`409 awaiting_approval`). Befo
 SEC-096 triggered runs were created and then never planned, executed or
 progressable by any endpoint.
 
+## Engagements (authorization scope)
+
+`exercises.targets`, `owner`, `starts_at` and `ends_at` are the authorization the
+tradecraft scope guard reads, so they are treated as a record:
+
+- Windows are validated on write — `bad_window` unless `starts_at`/`ends_at` parse as
+  ISO dates and the end does not precede the start.
+- An update touching scope, owner or the window is audited `exercise.scope_changed`
+  with the changed fields and their before/after values; a **closed** engagement
+  (`completed`/`aborted`) refuses such changes `409 terminal_exercise` and audits
+  `exercise.scope_change_denied`.
+- The scope guard treats an unreadable stored window as **not in force**, listing the
+  target under `ignored_entries` with `window_state: "invalid"` rather than
+  `authorized`, and `GET /api/tradecraft/scope/check` refuses with that reason.
+- `POST`/`PATCH /api/exercises…` decode `targets`/`meta` like `GET` does.
+
 ## Scan runs and SARIF import
 
 `POST /api/appsec/sarif` attaches findings to a scan run (deduplicated on run + rule +

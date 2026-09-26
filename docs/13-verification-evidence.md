@@ -843,7 +843,7 @@ Suite 267 → **268 passed** (1 new: alert aggregation count), ruff clean.
 Suite 268 → **271 passed** (3 new: playbook approval executes, approval rejection
 fails the run, `query_events` filtered/unfiltered), ruff clean.
 
-Suite 271 → … → 287 → **289 passed** (1 new: alert trigger runs auto playbooks and suggests
+Suite 271 → … → 289 → **291 passed** (1 new: alert trigger runs auto playbooks and suggests
 the rest) 272 → 274 (2 new: partial plans are refused as a whole) 274 → 275 (1 new: a failing
 schedule is recorded and retried on cadence) 275 → 277 (2 new: deleting the anchor is
 tampering, and a full rewrite is caught by an exported anchor) and 277 → 280 (3 new:
@@ -852,13 +852,15 @@ gated, and the inventory lists bundles) 280 → 282 (2 new: control evidence
 round-trips and verifies, and the seeded evidence points at a real file) 282 → 284 (2 new: a rule watching a field no event carries is reported, with no false
 positives) 284 → 285 (1 new: STIX imports validate confidence and normalise
 timestamps) 285 → 287 (2 new: the labelled alert series counts only open alerts,
-and expired sessions are not active) and 287 → 289 (2 new: a scan run's counters
-describe the run, and an import does not rewrite a reported status), ruff clean.
+and expired sessions are not active) 287 → 289 (2 new: a scan run's counters
+describe the run, and an import does not rewrite a reported status) and 289 → 291
+(2 new: a scope change is audited with before/after, and an unreadable window is
+refused and inert), ruff clean.
 
-**Current totals:** **289 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **291 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-106 series was reproduced first (as a failing check or a live request) and
+SEC-107 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1505,3 +1507,46 @@ the row agrees; import 2 → `{imported: 0, findings_total: 2, findings_new: 0}`
 findings list also reporting 2; a `failed` run stays `failed` with its findings recorded
 (`note: "run stays 'failed': importing results does not rewrite a status the caller
 reported"`), and a `running` run advances to `completed`.
+
+### SEC-107 — the authorization scope could be rewritten in silence (fixed)
+
+Found by re-reading the write path of the object the tradecraft scope guard trusts.
+`exercises.targets` is what authorizes work on a target; `PATCH /api/exercises/{id}`
+could replace it — plus the owner and the whole authorization window — and the audit
+entry said nothing had happened.
+
+**Was (three parts, all live-reproduced):**
+1. The audit detail was literally `{"status": body.status, "reason": body.reason}`, so a
+   request that changed only `targets`/`owner`/`starts_at`/`ends_at` wrote
+   `exercise.updated {"reason": null, "status": null}` — no record of who widened an
+   authorization or when.
+2. The write path returned the raw row while `GET` decoded it (the SEC-091 class):
+   `PATCH` answered `targets` as a JSON **string** (`"[\"test1@test.local\", …]"`) where
+   `GET` answered an array, which breaks the SPA (`.map`/`.join` on a string).
+3. `starts_at`/`ends_at` were never validated, and `_window_state` compares their first
+   ten characters as *strings* — so `ends_at: "banana"` sorted after today and the
+   engagement read as having a live window: an authorization that never lapses, from a
+   typo.
+
+**Fixed:**
+- Windows are validated where they are written: `starts_at`/`ends_at` must parse as
+  `YYYY-MM-DD` (a full timestamp's date part is accepted), and `ends_at` must not
+  precede `starts_at` → `400 bad_window` naming the field.
+- `_window_state` treats an unreadable stored date as `invalid` — **not in force**
+  (deny by default), since an unreadable window cannot bound an authorization — and
+  `authorized_targets` marks such entries unusable with the reason, listing them under
+  `ignored_entries` rather than `authorized`.
+- An update that touches `targets`/`owner`/`starts_at`/`ends_at` is audited as
+  `exercise.scope_changed` with `changed` and per-field `before_after` values;
+  other changes still write `exercise.updated` but now name the fields.
+- A **closed** engagement (`completed`/`aborted`) refuses scope/owner/window changes
+  with `409 terminal_exercise` and audits `exercise.scope_change_denied` — the scope a
+  recorded outcome rests on is not editable afterwards.
+- Both `create` and `update` responses decode `targets`/`meta`, like `GET` does.
+
+**Live (after fix):** `PATCH` returns `targets` as a list; the audit entry is
+`exercise.scope_changed {"changed": ["owner","targets"], "before_after": {...}}`;
+`ends_at: "banana"`, `2026-13-45` and an inverted window each → `400 bad_window` with
+the reason; a completed engagement → `409 terminal_exercise` with the refusal audited;
+and a stored unreadable window → `ignored_entries` entry `window_state: "invalid"`,
+`usable: false`, with `check_target` answering `in_scope: false` and naming the cause.

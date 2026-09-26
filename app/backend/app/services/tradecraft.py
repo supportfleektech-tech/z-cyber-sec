@@ -255,6 +255,18 @@ def _window_state(starts_at, ends_at, today: str) -> tuple[str, str | None]:
     """
     start = (str(starts_at)[:10] if starts_at else "") or ""
     end = (str(ends_at)[:10] if ends_at else "") or ""
+    # SEC-107: the comparison below is lexicographic, so an unreadable date sorted
+    # *after* today ("banana" > "2026-…") and the engagement read as having a live
+    # window — an authorization that never lapses, from a typo. Unreadable means
+    # unproven: treat it as not in force (deny by default) instead of active.
+    for label, value in (("starts_at", start), ("ends_at", end)):
+        if value:
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                return "invalid", (f"authorization window has an unreadable {label} "
+                                   f"({str(starts_at if label == 'starts_at' else ends_at)!r}) — "
+                                   "treated as not in force")
     if end and end < today:
         return "expired", f"authorization window ended {end} — renew the engagement"
     if start and start > today:
@@ -280,7 +292,7 @@ def authorized_targets(conn: sqlite3.Connection, today: str | None = None) -> li
         state, note = _window_state(r.get("starts_at"), r.get("ends_at"), today)
         for entry in (db.jload(r.get("targets"), []) or []):
             ok, why = _scope_entry_valid(str(entry))
-            if ok and state in ("expired", "not_started"):
+            if ok and state in ("expired", "not_started", "invalid"):
                 ok, why = False, note
             out.append({
                 "exercise_id": r["id"], "exercise": r["name"], "status": r["status"],
