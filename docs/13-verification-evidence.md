@@ -860,12 +860,13 @@ a 500) and 292 → 295 (3 new: a null into a NOT NULL column is refused, a falsy
 longer skips its existence check, and the constraint net answers documented codes)
 295 → 296 (1 new: a case's triage fields are enums on create *and* update) and
 296 → 298 (2 new: a nullable field can be cleared with an explicit null, on alerts and
-on cases), ruff clean.
+on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
+never counted as "within retention"), ruff clean.
 
-**Current totals:** **298 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **299 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-111 series was reproduced first (as a failing check or a live request) and
+SEC-112 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1699,3 +1700,34 @@ is kept, `{"title": null}` → `400 missing_field`, and the audit rows read
 the same clear-path gap remains there; each needs the same `model_fields_set` switch
 plus the JSON-column case (`db.jdump(None)` writes the *text* `"null"`, so a nullable
 JSON column needs an explicit `None`).
+
+### SEC-112 — a retention typo made evidence never come due (fixed)
+
+Found by checking the *consumers* of a free-text field: `POST /cases/{id}/evidence`
+stored `retention` as-is (`Form(None)`, never validated), while
+`/api/admin/retention/report` understands exactly two things — the window grammar
+`<n><d|w|m|y>` and the sentinels `legal-hold`/`legal_hold`/`retain-case-close`/
+`indefinite` — and `_retention_due` returns `None` for anything else, which the report
+then counted as **`within_retention`**.
+
+**Was:** `retention: "banana"` (or `"90 days"`, `"ninety"`) was accepted on upload, the
+artefact never came due for review, and the one report an operator checks for evidence
+governance said it was fine. A typo defeated the control silently — the SEC-107 shape
+(an unreadable value must not be read as "in force"), in the evidence domain.
+
+**Fixed:**
+- Upload validates and normalises the label: `<n><d|w|m|y>` (case- and
+  whitespace-insensitive, stored canonical — `6M` → `6m`) or a sentinel
+  (`legal_hold` stays), anything else is `400 bad_retention` with the accepted forms in
+  `allowed[]`; an empty value becomes `null` rather than `""`. The audit entry records
+  the stored label.
+- The report no longer blesses what it cannot parse: unrecognised labels are listed
+  under `unrecognised_retention` with an `unrecognised_count` and are excluded from
+  `within_retention`, so rows already stored (or seeded) with a bad label surface in
+  the report instead of hiding there.
+
+**Live (after fix):** `banana`, `90 days`, `ninety`, `999999d` → `400 bad_retention`
+naming the accepted forms; `6M` → stored `6m`, `legal_hold` → stored `legal_hold`,
+`30d` → stored `30d`, with the label in the `evidence.uploaded` audit detail; a
+legacy `banana` row appears under `unrecognised_retention` (`unrecognised_count: 1`)
+and is **not** in `within_retention` or `due_for_review`.

@@ -100,6 +100,14 @@ they never touch real entities and dedupe against prior runs.
 `GET/POST /{case_id}/evidence` · `GET /evidence/{evidence_id}/download`
 (download requires `evidence.download`; all access audited — ADR-005).
 
+**Evidence retention (SEC-112).** `POST /cases/{case_id}/evidence` accepts
+`retention` as a window `<n><d|w|m|y>` (`90d`, `4w`, `6m`, `12y`; case- and
+whitespace-insensitive, stored canonical) or one of the sentinels `legal-hold`,
+`legal_hold`, `retain-case-close`, `indefinite`; an empty value means "no label".
+Anything else is `400 bad_retention` with the accepted forms in `allowed[]` — the
+retention report can only act on that grammar, and a label it cannot parse is listed
+under `unrecognised_retention` (never as `within_retention`).
+
 **Partial updates (SEC-111).** A PATCH writes the fields you **sent** and leaves the
 rest alone. An explicit `null` clears a nullable field (`{"assigned_to": null}`
 unassigns; JSON Merge Patch, RFC 7396) — it is *not* the same as omitting the field.
