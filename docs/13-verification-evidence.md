@@ -855,12 +855,13 @@ timestamps) 285 → 287 (2 new: the labelled alert series counts only open alert
 and expired sessions are not active) 287 → 289 (2 new: a scan run's counters
 describe the run, and an import does not rewrite a reported status) and 289 → 291
 (2 new: a scope change is audited with before/after, and an unreadable window is
-refused and inert), ruff clean.
+refused and inert) and 291 → 292 (1 new: an oversized number is a client error, not
+a 500), ruff clean.
 
-**Current totals:** **291 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **292 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-107 series was reproduced first (as a failing check or a live request) and
+SEC-108 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1550,3 +1551,40 @@ entry said nothing had happened.
 the reason; a completed engagement → `409 terminal_exercise` with the refusal audited;
 and a stored unreadable window → `ignored_entries` entry `window_state: "invalid"`,
 `usable: false`, with `check_target` answering `in_scope: false` and naming the cause.
+
+### SEC-108 — an oversized number was an opaque 500 (fixed)
+
+Found by fuzzing every query parameter of every GET route in `/api/openapi.json`
+with boundary values (`""`, `abc`, `-1`, `999999`, `1e309`, `NaN`, `null`, `true`,
+`2026-13-45`, a 30-digit integer). Of 1,020 requests, 20 distinct ones answered
+**500 `internal_error`**:
+
+```
+GET /api/soc/alerts?page=999999999999999999999999999999       500
+GET /api/agents/tasks?agent_id=999…                           500
+GET /api/appsec/findings?scan_run_id=999…   /api/automation/runs?playbook_id=…
+/api/cloud/posture?asset_id=…   /api/vulns?asset_id=…          500   (+ 14 more)
+```
+
+**Was:** a query parameter is validated as a Python `int`, but Python ints are
+unbounded while SQLite's are 64-bit, so `sqlite3` raised
+`OverflowError: Python int too large to convert to SQLite INTEGER` from
+`db.paged`/`db.q` and the catch-all handler converted it into an opaque 500. Two
+different defects underneath one symptom: pagination, where the value is only ever
+a LIMIT/OFFSET, and filters that reach SQLite as a bound parameter.
+
+**Fixed:**
+- `db.paged` clamps `page`/`page_size` (`MAX_PAGE` 10,000,000, `MAX_PAGE_SIZE` 1000)
+  so every list endpoint is safe by construction: an absurd page is served as the
+  last page (empty `items`, real `total`, and the response reports the `page` it
+  served rather than pretending to serve page 10^29).
+- The app installs an `OverflowError` handler ahead of the catch-all, which answers
+  **422 `value_out_of_range`** — the documented `{code, message}` shape, stating the
+  bound (`|value| <= 9223372036854775807`) — for oversized numbers in filters. That
+  covers every current and future endpoint that binds a validated int straight into
+  SQL.
+
+**Live (after fix):** the same 1,020-request sweep answers **0 5xx**;
+`?page=999…` → `200 {items: [], total: 6, page: 10000000}` on alerts, assets, audit
+and GRC controls; `?agent_id=`/`?asset_id=`/`?scan_run_id=`/`?playbook_id=` oversized
+→ `422 value_out_of_range` naming the range.

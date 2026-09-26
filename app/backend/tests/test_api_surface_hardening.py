@@ -286,3 +286,39 @@ def test_metrics_sessions_active_excludes_expired(client, seeded, conn):
     after = conn.execute("SELECT expires_at FROM sessions").fetchall()
     assert len(after) == 1, "the expired rows are pruned, one live row remains"
     assert after[0]["expires_at"] > "2026-01-01T00:00:00Z"
+
+
+def test_oversized_numbers_are_client_errors_not_500s(client, seeded):
+    """SEC-108: a query parameter is validated as a Python int, but Python ints are
+    unbounded while SQLite's are 64-bit. Live repro before the fix: fuzzing every GET
+    route's parameters found 20 distinct 500s such as
+    `/api/soc/alerts?page=999999999999999999999999999999` and
+    `/api/agents/tasks?agent_id=999…` — an opaque `internal_error` for what is plainly
+    a bad request."""
+    big = "9" * 30
+    # Paging is clamped: an absurd page is served as the last page (empty items, real
+    # total) rather than crashing.
+    r = client.get(f"/api/soc/alerts?page={big}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["items"] == [] and body["total"] >= 1
+    assert body["page"] <= 10_000_000
+
+    # page_size already carries a documented maximum, so an absurd value is a clean
+    # 422 (not a 500), and a value inside the range is served.
+    r = client.get(f"/api/soc/alerts?page_size={big}")
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_request"
+    assert client.get("/api/soc/alerts?page_size=500").status_code == 200
+
+    # Numeric filters that reach SQLite: a clean 422 that states the bound.
+    for path in ("/api/agents/tasks", "/api/appsec/findings", "/api/automation/runs",
+                 "/api/cloud/posture", "/api/vulns"):
+        r = client.get(path, params={("scan_run_id" if "appsec" in path else
+                                      "playbook_id" if "automation" in path else
+                                      "asset_id" if ("cloud" in path or "vulns" in path) else "agent_id"): big})
+        assert r.status_code == 422, f"{path}: {r.status_code} {r.text}"
+        assert r.json()["detail"]["code"] == "value_out_of_range"
+        assert "range" in r.json()["detail"]["message"]
+
+    # A valid id still works.
+    assert client.get("/api/soc/alerts?page=1&page_size=5").status_code == 200

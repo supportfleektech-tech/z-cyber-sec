@@ -25,7 +25,15 @@ verification evidence.
   never has to branch on the shape (SEC-080).
 - **Time:** ISO-8601 UTC strings.
 - **List endpoints:** most return `{items, total}` with `page` /
-  `page_size` query params; a few domain lists return a flat `{items}`.
+  `page_size` query params; a few domain lists return a flat `{items}`. Paging is
+  clamped rather than refused (`page` ≤ 10,000,000, `page_size` ≤ 1,000): a huge
+  `page` is served as the last page — empty `items`, the real `total`, and the
+  `page` actually served (SEC-108).
+- **Numbers:** query params are Python ints but SQLite's are 64-bit, so a value
+  outside `|n| <= 9223372036854775807` in an id filter (e.g.
+  `?asset_id=999…`) is `422 value_out_of_range` naming the bound — never a 500
+  (SEC-108). `page_size` outside its documented maximum stays `422
+  invalid_request`.
 
 ## Endpoint table
 
@@ -492,6 +500,7 @@ implemented.
 | `bad_status` / `bad_kind` / `bad_role` | enum validation |
 | `bad_severity` | severity values outside the standard five (SEC-079) |
 | `invalid_request` | request validation (422), with `errors[]` |
+| `value_out_of_range` | numeric query param outside the 64-bit range (422, SEC-108) |
 | `no_changes` | PATCH with empty diff |
 | `missing` | report file gone |
 | `confirm_required` | restore without `confirm:"RESTORE"` |

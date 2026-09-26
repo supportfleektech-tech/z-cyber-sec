@@ -110,12 +110,27 @@ def jload(v: str | None, default=None):
         return default
 
 
+# A query parameter is validated as a Python int, but Python ints are unbounded and
+# SQLite's are 64-bit: a request such as `?page=999999999999999999999999999999` reached
+# the driver and raised `OverflowError`, which became an opaque 500 (SEC-108). Clamp
+# paging here so every list endpoint is safe by construction, and let the global
+# handler in main.py answer a clean 422 for any other oversized number.
+MAX_SQLITE_INT = 2**63 - 1
+MAX_PAGE = 10_000_000
+MAX_PAGE_SIZE = 1000
+
+
 def paged(conn: sqlite3.Connection, base_sql: str, params: tuple, order: str,
           page_no: int, page_size: int) -> dict:
     """Standard list response: {items, total, page, page_size}.
 
     base_sql is a SELECT without ORDER BY/LIMIT (the count is derived from it).
+    Out-of-range paging is clamped to a serveable value rather than refused: the
+    response says which page was served, so an absurd request returns an empty page
+    with the real total (SEC-108).
     """
+    page_no = max(1, min(int(page_no), MAX_PAGE))
+    page_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
     total_row = one(conn, f"SELECT COUNT(*) AS c FROM ({base_sql})", params)
     total = int(total_row["c"]) if total_row else 0
     items = q(conn, f"{base_sql} {order} LIMIT ? OFFSET ?",

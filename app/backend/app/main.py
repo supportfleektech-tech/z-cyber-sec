@@ -83,6 +83,19 @@ def create_app() -> FastAPI:
                                                 "message": summary or "Invalid request.",
                                                 "errors": items}})
 
+    @app.exception_handler(OverflowError)
+    async def out_of_range(request: Request, exc: OverflowError):
+        # SEC-108: a query parameter is validated as a Python int, but Python ints are
+        # unbounded while SQLite's are 64-bit — `?agent_id=999…` reached the driver and
+        # answered an opaque 500. It is a client error: state the bound.
+        return JSONResponse(status_code=422,
+                            content={"detail": {
+                                "code": "value_out_of_range",
+                                "message": (f"a numeric parameter exceeds the supported range "
+                                            f"(|value| <= {2**63 - 1})"),
+                                "errors": [{"field": "(query)", "msg": str(exc)[:200],
+                                            "type": "value_out_of_range"}]}})
+
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception):
         # Never leak stack traces or SQL into responses.
