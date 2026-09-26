@@ -1890,3 +1890,20 @@ operations. Path parameters are filled from real rows (so the happy path is exer
 rather than a 404), and the two parameters the checker legitimately cannot resolve —
 a per-user resource the admin owns none of — are reported with the reason instead of
 as a dataset gap. Usage: `python -m scripts.smoke_check [--base-url …] [--json]`.
+
+#### SEC-119 — one entry point, and a README that had drifted
+
+Every routine action was a shell incantation spread across documents, and the README's
+own status line had drifted (110/110 tests, two migrations, four CI jobs — the repo has
+305, seven and five). Added a `Makefile`: `make lab` is venv + pinned deps + SPA build +
+seeded database, then `make run` serves it; `make test`/`lint`/`rules`/`smoke`/`accept`/
+`doctor`/`backup-drill`/`loadtest`/`lab-up`/`lab-down`/`lab-status`/`clean` cover the rest,
+and `reseed-reset` is the only destructive target and prompts first. `make doctor` needed
+a real command, so `scripts/doctor_report.py` reads `/api/admin/doctor` and exits
+0/1/2 on ok/warn/fail (`make doctor` → `verdict: OK (11 ok, 0 warn, 0 fail)`).
+
+The claim that `make seed` was safe on an existing database was tested rather than
+asserted: it refuses with `{"skipped": true, "reason": "users already exist (database not
+fresh)"}` and the row counts are unchanged, so the target's help text now says exactly
+that. README status, migrations, script/test inventories, doc index and CI description
+corrected to what the repo actually is; `docs/08` gained the short path.

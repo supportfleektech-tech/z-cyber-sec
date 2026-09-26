@@ -1,9 +1,10 @@
 # CYBER-SEC — Cybersecurity Engineering & Intelligence Lab
 
 **Status:** Implemented v1.0 (modular monolith + React SPA), local-first, zero-budget.
-**Verified:** 110/110 backend tests, ruff clean, SPA builds + served, live smoke checks,
-backup/restore rehearsal PASS — see `docs/13-verification-evidence.md` for the full
-evidence log (commands, timestamps, limitations).
+**Verified:** 305/305 backend tests, ruff clean, SPA builds + served, 214-check live
+smoke, acceptance clauses 10 demonstrated / 2 host-ops / 0 failed, backup/restore
+rehearsal PASS — see `docs/13-verification-evidence.md` for the full evidence log
+(commands, timestamps, limitations).
 
 > All data in this repository and its default runtime is **synthetic**
 > (`data_class='synthetic'`). No real credentials, real targets, or real
@@ -26,6 +27,18 @@ Vulnerability Management · GRC & Compliance · Authorized Red Team / CTF
 
 ## Quick start (local, ~3 minutes)
 
+Everything routine has a target (run `make help` for the list):
+
+```bash
+make lab     # venv + deps + SPA build + seeded database, then start it with:
+make run     # http://localhost:8080
+make test    # 305 tests          make smoke   # live surface + RBAC (instance must be up)
+make accept  # acceptance clauses make doctor  # the app's own self-diagnosis
+make lab-up  # the vulnerable training range (docker, loopback-only)
+```
+
+<details><summary>Doing it by hand (same steps)</summary>
+
 ```bash
 # Backend (Python 3.11)
 cd app/backend
@@ -43,6 +56,8 @@ Open `http://localhost:8080/` — default lab login **admin /
 `CyberSecAdmin1!`** (synthetic; rotate before any non-LOCAL environment).
 Interactive API docs: `/api/docs`.
 
+</details>
+
 ## Layout
 
 ```
@@ -57,14 +72,17 @@ app/backend/
                          # cloud, grc, exercises, agents, automation, reports, admin, ...)
   app/services/          # detection engine (Sigma-subset), STIX subset parser,
                          # backup, policy, report builder
-  app/migrations/        # 0001_init.sql (full schema) + 0002_extensions.sql (auto-applied)
+  app/migrations/        # 0001_init .. 0007_lab_range (auto-applied, additive)
   app/seed/              # synthetic demo data (explicitly labeled)
-  scripts/               # load_test.py (SEC-043), backup_rehearsal.py (SEC-063 drill)
+  scripts/               # smoke_check (SEC-114b), acceptance_check (SEC-118), doctor_report
+                         # (SEC-116), lint_rules (SEC-074), backup_rehearsal (SEC-063),
+                         # load_test (SEC-043)
   scenarios/             # purple-team synthetic-attack scenarios (pt-*.yaml, SEC-072)
-  tests/                 # 110 tests: auth, RBAC, detection, intel, agents, e2e, extensions, ...
+  tests/                 # 305 tests: auth, RBAC, detection, intel, agents, e2e, extensions, ...
   Dockerfile             # multi-stage prod image (non-root, pinned deps, healthcheck)
 app/frontend/            # React 18 + TS + Vite SPA (served by backend)
-docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence
+docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence,
+                         # 14 release gate, 15 detection rules, 16 tradecraft, 17 lab range
 docs/adr/                # 001–007 architecture decisions
 planning/                # roadmap, backlog, threat scope, workflow
 infra/                   # README + local compose, target-host network matrix, prod/Caddy edge
@@ -122,9 +140,10 @@ cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
 cd app/frontend && npm run build                         # tsc -b && vite build
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs four jobs on every push/PR:
-secrets (gitleaks), backend (ruff + rule lint + pytest), frontend
-(typecheck + build), supply-chain (SBOM + pip-audit + npm audit).
+GitHub Actions (`.github/workflows/ci.yml`) runs five jobs on every push/PR:
+secrets (gitleaks, full history), backend (ruff + rule lint + pytest), live
+(seeded uvicorn + smoke check + acceptance clauses), frontend (typecheck +
+build), supply-chain (SBOM + pip-audit + npm audit).
 
 ## Documentation index
 
