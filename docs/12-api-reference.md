@@ -323,12 +323,20 @@ tradecraft scope guard reads, so they are treated as a record:
 
 ## Scan runs and SARIF import
 
+`POST /api/appsec/scan-runs` validates the run's vocabulary: `kind` ∈
+`{sast, dependency, secret_scan, container}` and `status` ∈
+`{running, completed, failed, cancelled}` (`400 bad_kind` / `bad_status` with
+`allowed[]`), and `started_at`/`finished_at` must be ISO dates (`400 bad_timestamp`) —
+the list is ordered by those columns as text, so an unreadable one would sort to the
+top forever (SEC-113).
+
 `POST /api/appsec/sarif` attaches findings to a scan run (deduplicated on run + rule +
 file + line) and updates the run's counters: `findings_total` is the number of findings
 attached to the run, and `findings_new` is what this import added; both are returned
-with `scan_run_id`. A run reported as `failed`/`cancelled` keeps that status when
-results arrive (the response says so in `note`); a `running` run advances to
-`completed`. Before SEC-106 `findings_total` was overwritten with the count created by
+with `scan_run_id`. The response always reports `status` — the run's status *after* the
+import — with a `note`: a run reported as `failed`/`cancelled` keeps that status
+("importing results does not rewrite a status the caller reported"), while a `running`
+run advances to `completed`. Before SEC-106 `findings_total` was overwritten with the count created by
 the latest call — so a re-import zeroed it — and `findings_new` was never maintained.
 
 ## Metrics

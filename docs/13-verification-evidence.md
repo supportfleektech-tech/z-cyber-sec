@@ -861,12 +861,14 @@ longer skips its existence check, and the constraint net answers documented code
 295 → 296 (1 new: a case's triage fields are enums on create *and* update) and
 296 → 298 (2 new: a nullable field can be cleared with an explicit null, on alerts and
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
-never counted as "within retention"), ruff clean.
+never counted as "within retention") and 299 → 300 (1 new: a scan run's kind, status
+and timestamps are validated, and the import always reports the run's status),
+ruff clean.
 
-**Current totals:** **299 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **300 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
-SEC-112 series was reproduced first (as a failing check or a live request) and
+SEC-113 series was reproduced first (as a failing check or a live request) and
 re-verified afterwards, live where the defect was live.
 
 ## Known limitations & blocked items
@@ -1731,3 +1733,36 @@ naming the accepted forms; `6M` → stored `6m`, `legal_hold` → stored `legal_
 `30d` → stored `30d`, with the label in the `evidence.uploaded` audit detail; a
 legacy `banana` row appears under `unrecognised_retention` (`unrecognised_count: 1`)
 and is **not** in `within_retention` or `due_for_review`.
+
+### SEC-113 — a scan run's kind and status were free text (fixed)
+
+Found by checking which string fields the rest of the platform keys off. `POST
+/api/appsec/scan-runs` stored `kind` and `status` exactly as sent, while (a) the SPA
+offers exactly four kinds, (b) `POST /api/appsec/sarif` decides whether to advance a
+run by comparing `status` to the literals `failed`/`cancelled` (SEC-106), and (c)
+`GET /api/appsec/scan-runs` orders by `COALESCE(finished_at, started_at) DESC` on the
+stored *text*.
+
+**Was:** a run registered as `status: "Failed"`/`"fialed"` was silently advanced to
+`completed` by the next import — the exact behaviour SEC-106 removed, re-entering
+through a typo — and any count of failures missed it; `kind: "banana"` belonged to no
+view; and `started_at: "banana"` sorted after every real date, pinning that run to the
+top of the list forever (the SEC-107 shape again: an unreadable value read as
+authoritative).
+
+**Fixed:**
+- `kind` ∈ `{sast, dependency, secret_scan, container}` (the SPA's set) → `400 bad_kind`
+  with `allowed[]`; `status` ∈ `{running, completed, failed, cancelled}` → `400
+  bad_status` with `allowed[]`.
+- `started_at`/`finished_at` must parse as an ISO date (a full timestamp is accepted)
+  and may not be blank → `400 bad_timestamp`.
+- The SARIF import response now **always** reports the run's status after the import
+  (`status` was absent exactly when the import advanced the run) with a `note` saying
+  whether it was kept or advanced, so no client has to guess or re-read the run.
+
+**Live (after fix):** `banana`/`SAST`/`sast ` → `400 bad_kind` with the four allowed;
+`Failed`/`fialed`/`done` → `400 bad_status`; `started_at: "banana"` and
+`finished_at: "2026-13-45"` → `400 bad_timestamp`; a valid `dependency`/`running` run
+→ 201, import → `{..., "status": "completed", "note": "run advanced from 'running' to
+'completed'"}`; a `failed` run → `{..., "status": "failed", "note": "run stays
+'failed': …"}`.
