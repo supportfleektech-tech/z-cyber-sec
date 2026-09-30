@@ -6,7 +6,6 @@ sha256, classification, retention; every access audited.
 from __future__ import annotations
 
 import hashlib
-import re
 import secrets
 import sqlite3
 from pathlib import Path
@@ -19,6 +18,7 @@ from .. import db
 from ..audit import record_audit
 from ..config import settings
 from ..deps import require
+from ..services import retention as retention_grammar
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -30,13 +30,9 @@ CASE_PRIORITIES = {"low", "medium", "high", "critical"}
 CASE_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 TASK_STATUSES = {"open", "in_progress", "done", "canceled"}
 CLASSIFICATIONS = {"public", "internal", "confidential", "restricted"}
-# Evidence retention is a *control*, not a note (SEC-112): the retention report only
-# understands `<n><d|w|m|y>` and the sentinels below, and its `_retention_due` returns
-# None for anything else — which the report then counted as `within_retention`. A typo
-# ("banana", "90 days") therefore produced evidence that never came due for review
-# while the operator's report said it was fine.
-RETENTION_SENTINELS = {"legal-hold", "legal_hold", "retain-case-close", "indefinite"}
-RETENTION_RE = re.compile(r"^(\d{1,5})\s*([dwmy])$", re.IGNORECASE)
+# Evidence retention is a *control*, not a note (SEC-112), and it is parsed in exactly
+# one place (SEC-122): `services.retention` is shared with the retention report, so the
+# grammar the writer accepts and the grammar the report acts on cannot drift apart.
 MAX_EVIDENCE_BYTES = 25 * 1024 * 1024
 
 
@@ -59,23 +55,33 @@ def _validate_triage(priority: str | None, severity: str | None) -> None:
 
 
 def _validate_retention(retention: str | None) -> str | None:
-    """Normalise a retention label, or refuse it (SEC-112).
+    """Normalise a retention label, or refuse it (SEC-112/122).
 
     Returns the canonical label (`90d`, `legal-hold`, …) or None for "no label".
+
+    A **zero window** (`0d`, `0y`, `00w`) is refused rather than stored: it parses, but
+    it means "this evidence is due for destruction the moment it exists", so a typo put
+    fresh artefacts straight into the report's `due_for_review` — the queue a human
+    works through to delete things. Wanting to keep something forever is what the
+    sentinels are for.
     """
-    if retention is None or not retention.strip():
+    parsed = retention_grammar.parse(retention)
+    if parsed.kind == "empty":
         return None
-    label = retention.strip().lower()
-    if label in RETENTION_SENTINELS:
-        return label
-    m = RETENTION_RE.match(label)
-    if not m:
+    if parsed.kind == "window" and parsed.is_zero_window:
+        raise HTTPException(400, {
+            "code": "bad_retention",
+            "message": (f"retention window must be at least 1 unit — {parsed.canonical!r} would "
+                        "mark the evidence due for destruction immediately; use a sentinel "
+                        f"({sorted(retention_grammar.SENTINELS)}) to keep it"),
+            "allowed": retention_grammar.ALLOWED})
+    if parsed.kind == "unrecognised":
         raise HTTPException(400, {
             "code": "bad_retention",
             "message": ("retention must be a window like 90d, 4w, 6m or 12y — or one of "
-                        f"{sorted(RETENTION_SENTINELS)}"),
-            "allowed": sorted(RETENTION_SENTINELS) + ["<n>d", "<n>w", "<n>m", "<n>y"]})
-    return f"{int(m.group(1))}{m.group(2)}"
+                        f"{sorted(retention_grammar.SENTINELS)}"),
+            "allowed": retention_grammar.ALLOWED})
+    return parsed.canonical
 
 
 def _next_number(conn) -> str:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -15,6 +14,7 @@ from .. import db
 from ..audit import record_audit, verify_chain
 from ..config import settings
 from ..deps import require
+from ..services import retention as retention_grammar
 from ..services.backup import create_backup, restore_from, verify_bundle
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -436,32 +436,20 @@ def restore(body: RestoreIn, conn: sqlite3.Connection = Depends(db.get_conn),
 # SEC-072: retention REPORT only — ADR-005: deletion is a human, audited
 # operation; this surfaces what is due, pinned, or case-dependent.
 
-_UNIT_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
-
-
-def _retention_understood(retention: str | None) -> bool:
-    """True when the label is one the report can act on (SEC-112)."""
-    label = (retention or "").strip().lower()
-    return label in ("legal-hold", "legal_hold", "retain-case-close", "indefinite") or \
-        bool(re.fullmatch(r"\d+\s*[dwmy]", label))
-
-
+# The label grammar lives in services.retention (SEC-122): the writer and this report
+# used to parse it separately, and the two grammars had drifted — a six-digit window the
+# upload refused was "understood" here and counted as within retention.
 def _retention_due(retention: str | None, created_at: str, now: str) -> str | None:
-    """Return 'due' if the label's window has elapsed; None otherwise.
-    legal-hold / retain-case-close are never auto-due."""
-    if not retention:
-        return None
-    label = retention.strip().lower()
-    if label in ("legal-hold", "legal_hold", "retain-case-close", "indefinite"):
-        return None
-    m = re.fullmatch(r"(\d+)\s*([dwmy])", label)
-    if not m:
-        return None
-    from datetime import timedelta
-    days = int(m.group(1)) * _UNIT_DAYS[m.group(2)]
+    """Return 'due' if a valid, non-zero window has elapsed; None otherwise.
+
+    Sentinels (legal-hold, retain-case-close, indefinite) are never auto-due, and an
+    unparseable label is never due either — both are handled by the caller so that
+    "cannot parse" can never be mistaken for "safe" or for "destroy".
+    """
     created = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     current = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    return "due" if (current - created) > timedelta(days=days) else None
+    elapsed_days = (current - created).total_seconds() / 86400
+    return "due" if retention_grammar.due(retention, elapsed_days) else None
 
 
 @router.get("/retention/report")
@@ -469,25 +457,33 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
                      user: dict = Depends(require("audit.read"))):
     now = db.utcnow()
     ev = db.q(conn, "SELECT id, name, sha256, size, classification, retention, created_at, case_id FROM evidence")
-    due, unrecognised, pinned, case_bound, ok = [], [], 0, 0, 0
+    due, unrecognised, zero, pinned, case_bound, ok = [], [], [], 0, 0, 0
     for e in ev:
-        label = (e["retention"] or "").strip().lower()
-        if label in ("legal-hold", "legal_hold"):
+        parsed = retention_grammar.parse(e["retention"])
+        row = {"id": e["id"], "name": e["name"], "retention": e["retention"],
+               "created_at": e["created_at"], "sha256": (e["sha256"] or "")[:16]}
+        if parsed.kind == "empty":
+            ok += 1
+        elif parsed.canonical in retention_grammar.PINNED:
             pinned += 1
-            continue
-        if label == "retain-case-close":
+        elif parsed.canonical == retention_grammar.CASE_BOUND:
             case_bound += 1
-            continue
-        if _retention_due(e["retention"], e["created_at"], now) == "due":
-            due.append({"id": e["id"], "name": e["name"], "retention": e["retention"],
-                        "created_at": e["created_at"], "sha256": e["sha256"][:16]})
-        elif label and not _retention_understood(e["retention"]):
+        elif parsed.canonical == "indefinite":
+            # Understood and never due: a deliberate "keep", so it belongs with the
+            # artefacts that are within their retention rather than in a new bucket.
+            ok += 1
+        elif parsed.is_zero_window:
+            # SEC-122: a zero window parses but demands destruction immediately — a
+            # typo, not an instruction. Report it; do not queue it for deletion, and
+            # do not count it as fine. Writes refuse these now (cases.py).
+            zero.append(row)
+        elif parsed.kind == "unrecognised":
             # SEC-112: a label the report cannot parse is *not* evidence of being
             # within retention — it used to be counted as `within_retention`, so a
             # typo made an artefact never come due while the report blessed it.
-            # Writes are validated now (cases.py); this surfaces rows already stored.
-            unrecognised.append({"id": e["id"], "name": e["name"], "retention": e["retention"],
-                                 "created_at": e["created_at"]})
+            unrecognised.append(row)
+        elif _retention_due(e["retention"], e["created_at"], now) == "due":
+            due.append(row)
         else:
             ok += 1
     backups_dir = settings.backups_dir
@@ -516,7 +512,11 @@ def retention_report(conn: sqlite3.Connection = Depends(db.get_conn),
             "total": len(ev), "due_for_review": due, "due_count": len(due),
             "legal_hold": pinned, "case_bound": case_bound, "within_retention": ok,
             "unrecognised_retention": unrecognised, "unrecognised_count": len(unrecognised),
-            "note": "Report only (ADR-005). Deletion is a human, audited operation.",
+            "zero_window_retention": zero, "zero_window_count": len(zero),
+            "note": ("Report only (ADR-005). Deletion is a human, audited operation. "
+                     "`zero_window_retention` rows carry a 0d/0w/0m/0y label stored before "
+                     "writes refused them (SEC-122): the label is invalid, so set a window "
+                     "deliberately rather than treating it as a destruction instruction."),
         },
         "backups": {"total": len(backups), "items": backups},
     }

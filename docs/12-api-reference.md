@@ -108,6 +108,17 @@ Anything else is `400 bad_retention` with the accepted forms in `allowed[]` — 
 retention report can only act on that grammar, and a label it cannot parse is listed
 under `unrecognised_retention` (never as `within_retention`).
 
+**A window of zero units is refused (SEC-122).** `0d`, `0y`, `00w` parse, but they mean
+"due for destruction the moment it exists": a typo put fresh evidence straight into the
+report's `due_for_review`, the queue a human works through to delete artefacts. Ask for a
+sentinel (`legal-hold`, `retain-case-close`, `indefinite`) to keep something; one day is
+the smallest window. Rows already stored with a zero window are listed separately as
+`zero_window_retention` (with `zero_window_count`) rather than queued for deletion.
+
+The grammar itself lives in one place — `app/services/retention.py` — and both the upload
+route and the report import it, so what is refused on write is exactly what the report
+acts on.
+
 **Partial updates (SEC-111).** A PATCH writes the fields you **sent** and leaves the
 rest alone. An explicit `null` clears a nullable field (`{"assigned_to": null}`
 unassigns; JSON Merge Patch, RFC 7396) — it is *not* the same as omitting the field.
@@ -275,7 +286,7 @@ are safe; at-most-once-per-interval by design.
 | `GET/POST /integrations` · `POST /integrations/{id}/health` | Integration inventory + health probe |
 | `POST /backup` | Consistent backup → `{path, sha256, ...}` |
 | `POST /backup/restore` | `{path, confirm:"RESTORE"}`; the path is **resolved and must be a file inside `data/backups`** (SEC-085 — a path that merely mentions "backups" is refused: `400 bad_path`). The bundle must pass `verify_bundle`: manifest present, every archive member declared in it, no symlinks/hardlinks, no `..`/absolute member names, checksums equal. Unreadable or corrupt archives are a `409 verify_failed` naming the reason (SEC-086), never a 500 |
-| `GET /retention/report` | Evidence retention **report only** (SEC-072, ADR-005): per-item `within_retention`/`due` + `legal_hold` (case-bound) flags; never deletes — deletion stays a human, audited act |
+| `GET /retention/report` | Evidence retention **report only** (SEC-072, ADR-005): `due_for_review`, `legal_hold`, `case_bound`, `within_retention`, `unrecognised_retention`, `zero_window_retention` (SEC-122) + verified backup bundles; never deletes — deletion stays a human, audited act |
 | `POST /releases` | Record a human release decision (SEC-064): `{version, commit_sha, checklist_sha256 (64-hex), decision: approved\|rejected, comment?}` — admin only (`release.write`), audit-logged |
 | `GET /releases` | Decision history (paginated, newest first) |
 | `GET /releases/latest` | The gate: `{latest, gate: approved\|blocked\|no_decision, note}` — rollout must see `approved` for the exact version+commit |
@@ -581,6 +592,7 @@ over TLS. The Caddy edge sets its own copies and can override these (SEC-117).
 | `duplicate` | a unique value already exists (409, constraint net, SEC-109) |
 | `constraint_violation` | another data constraint (CHECK/…) refused the write (400, SEC-109) |
 | `bad_endpoint` | a lab target endpoint is not interior to the lab (400, SEC-115) |
+| `bad_retention` | retention label the report cannot act on — unparseable, or a zero window (400, SEC-112/122) |
 | `duplicate_endpoint` | another lab target already uses that endpoint (409, SEC-115) |
 | `target_in_use` | retiring a target an active exercise still authorizes (409, SEC-115) |
 | `bad_exposure` | exposure outside `{critical, high, medium, low}` (400, SEC-115) |

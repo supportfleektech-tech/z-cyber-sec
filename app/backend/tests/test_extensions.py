@@ -180,6 +180,74 @@ def test_unreadable_retention_is_refused_and_never_blessed(client, seeded, conn)
     assert not any(e["name"] == "legacy-typo.syn" for e in ev["due_for_review"])
 
 
+def test_zero_retention_window_is_refused_not_obeyed(client, seeded, conn):
+    """SEC-122: `0d` parses, so the writer accepted it — and the report then put the
+    artefact straight into `due_for_review`, the queue a human works through to destroy
+    evidence. A typo became a destruction instruction on evidence uploaded seconds
+    earlier. Writes refuse a zero window now, and rows stored before the fix are
+    surfaced as invalid rather than queued for deletion."""
+    import io
+
+    def upload(retention, name="zero-window.txt"):
+        return client.post("/api/cases/1/evidence",
+                           files={"file": (name, io.BytesIO(b"synthetic"), "text/plain")},
+                           data={"classification": "internal", "retention": retention})
+
+    for bad in ("0d", "0y", "0m", "00w", "0 d"):
+        r = upload(bad)
+        assert r.status_code == 400, f"{bad}: {r.status_code} {r.text}"
+        detail = r.json()["detail"]
+        assert detail["code"] == "bad_retention"
+        assert "at least 1 unit" in detail["message"], detail["message"]
+        assert detail["allowed"]
+
+    # One day is the smallest window that means something, and it is not due yet.
+    assert upload("1d").json()["retention"] == "1d"
+
+    # A row stored before the fix must not be treated as "destroy immediately".
+    conn.execute(
+        "INSERT INTO evidence (case_id, name, path, sha256, size, classification, retention, uploaded_by, created_at) "
+        "VALUES (1, 'legacy-zero.syn', 'syn/zero.bin', 'd' * 64, 10, 'internal', '0d', 'admin', ?)",
+        ("2020-01-02T03:04:05Z",))
+    conn.execute(
+        "INSERT INTO evidence (case_id, name, path, sha256, size, classification, retention, uploaded_by, created_at) "
+        "VALUES (1, 'legacy-six-digit.syn', 'syn/six.bin', 'e' * 64, 10, 'internal', '999999d', 'admin', ?)",
+        ("2020-01-02T03:04:05Z",))
+    conn.commit()
+
+    ev = client.get("/api/admin/retention/report").json()["evidence"]
+    assert ev["zero_window_count"] >= 1
+    assert any(e["name"] == "legacy-zero.syn" for e in ev["zero_window_retention"])
+    assert not any(e["name"] == "legacy-zero.syn" for e in ev["due_for_review"])
+    # The six-digit window the upload refuses must not be blessed as "within" either:
+    # one grammar for the writer and the report (this used to count as within).
+    assert any(e["name"] == "legacy-six-digit.syn" for e in ev["unrecognised_retention"])
+    assert "destruction instruction" in ev["note"]
+    assert ev["due_count"] + ev["legal_hold"] + ev["case_bound"] + ev["within_retention"] \
+        + ev["unrecognised_count"] + ev["zero_window_count"] == ev["total"]
+
+
+def test_retention_grammar_is_shared_by_writer_and_report():
+    """SEC-122: the two grammars had drifted — six-digit windows were refused on upload
+    but "understood" by the report. Both now import services.retention."""
+    from app.services import retention
+
+    assert retention.parse(None).kind == "empty"
+    assert retention.parse("  ").kind == "empty"
+    assert retention.parse("LEGAL-HOLD").canonical == "legal-hold"
+    assert retention.parse(" 6 M ").canonical == "6m"
+    assert retention.parse("6m").days == 180
+    assert retention.parse("1y").days == 365
+    assert retention.parse("999999d").kind == "unrecognised"
+    assert retention.parse("banana").kind == "unrecognised"
+    assert retention.parse("0d").is_zero_window and not retention.due("0d", 9999)
+    # due() only fires for valid, non-zero windows that have actually elapsed
+    assert not retention.due("90d", 89.9)
+    assert retention.due("90d", 90.1)
+    assert not retention.due("legal-hold", 10 ** 6)
+    assert not retention.due("banana", 10 ** 6)
+
+
 # ------------------------------------------------------------- agent adapters
 
 def _make_agent(client, tools, adapter, config=None, name="adapt-test"):

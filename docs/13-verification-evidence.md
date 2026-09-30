@@ -863,11 +863,11 @@ longer skips its existence check, and the constraint net answers documented code
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
 never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
 and timestamps are validated, and the import always reports the run's status),
-300 → 310 (10 new: the lab range registry and its cross-checks ×2, the operator
+300 → 317 (17 new: the lab range registry and its cross-checks ×2, the operator
 self-diagnosis, the baseline security headers, and the doctor's access rule split out),
 ruff clean.
 
-**Current totals:** **310 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **317 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
 SEC-117 series was reproduced first (as a failing check or a live request) and
@@ -1960,3 +1960,59 @@ Writing it immediately found three real gaps: **docs/11 never listed the Tradecr
 page** (15 of 16 pages documented), **`0004_tradecraft.sql` was documented nowhere**, and
 `docs/18-final-status.md` was not in the README index. All three are fixed; docs/04 also
 gained a migration table so the next migration has an obvious home.
+
+#### SEC-122 — a zero retention window was obeyed as "destroy immediately"
+
+Found by running the last loose end from the SEC-112 hunt (`0d`, `1y `) against the live
+API instead of assuming it was cosmetic. Uploading evidence with `retention: "0d"` was
+accepted, and the retention report then listed it under **`due_for_review`** — the queue a
+human works through to *destroy* artefacts — seconds after upload. `0y` and `00w` behaved
+the same way. A retention label is a control (SEC-112); a zero-length one is not a policy,
+it is a typo, and it should never read as an instruction to delete fresh evidence.
+
+Inspecting it found the deeper cause: the grammar was parsed **twice**. The writer
+(`routers/cases.py`) accepted `\d{1,5}<d|w|m|y>`; the report (`routers/admin.py`) accepted
+`\d+<d|w|m|y>`. So a legacy row with a six-digit window was refused on upload but
+"understood" by the report — and counted as `within_retention`, i.e. blessed — which is
+exactly the SEC-112 failure mode, still live for stored rows.
+
+**Fixed:**
+- `app/services/retention.py` is now the single grammar: `parse()` classifies a label as
+  `empty` / `sentinel` / `window` / `unrecognised`, and `due()` answers only for valid,
+  non-zero windows. Both routers import it, so writer and report cannot drift again.
+- The upload route refuses a zero window with a message that says why: *"retention window
+  must be at least 1 unit — '0d' would mark the evidence due for destruction immediately;
+  use a sentinel (…) to keep it"*.
+- The report gained `zero_window_retention` / `zero_window_count`, and those rows are kept
+  out of `due_for_review`. The bucket note says the label is invalid, so an operator sets a
+  window deliberately instead of reading the row as "delete now". Unparseable labels from
+  stored rows (including six-digit windows) land in `unrecognised_retention`.
+
+**Live (seeded instance):** `0d` → `400 bad_retention` ("must be at least 1 unit"), `0y`
+and `00w` the same (`00w` reported canonically as `0w`), `1d` → `201`, `90d` → `201`; the
+report then read `total 7, zero_window_count 3, due_count 0`, with the three pre-fix rows
+listed under `zero_window_retention` and the buckets summing to `total`.
+
+Tests: 310 → 312 (zero windows refused, pre-fix rows surfaced not obeyed, and the grammar
+shared by writer and report), ruff clean.
+
+#### SEC-123 — nothing checked that the SPA's URLs still exist
+
+Every suite on either side of the UI/API boundary is thorough and none crossed it: the
+backend tests call routes directly, and `test_enum_parity.py` compares *vocabularies* by
+reading the SPA source. A stale URL — a renamed router, a changed prefix, a typo — is not
+a Python exception; it is a 404 the user reads as "failed to load", and the backend suite
+stays green.
+
+`tests/test_spa_route_contract.py` reads all 91 `api.get/post/patch/delete(...)` calls in
+`app/frontend/src/`, turns the generated OpenAPI document into per-method path matchers
+(template literals match on their fixed segments) and asserts every call resolves — and
+that it resolves **for the method it uses**, since `api.get` on a POST-only route is the
+same 405 in the browser. The route table is read from `app.openapi()` rather than
+`app.routes`, which also makes the test independent of the FastAPI version's router
+wrapping.
+
+Verified by mutation rather than by inspection: renaming `/api/lab/coverage` to
+`/api/lab/coverageX` in `Lab.tsx` fails the test with
+`Lab.tsx: api.get('/api/lab/coverageX')`; restoring the file passes it again. 91 calls
+checked against 67 GET / 51 POST / 15 PATCH / 2 DELETE routes.

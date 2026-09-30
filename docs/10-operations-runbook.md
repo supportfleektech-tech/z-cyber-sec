@@ -55,6 +55,8 @@ unless noted; `ADMIN` = an admin session (cookie or `curl -b` handle).
   `external.ok: false` means the log no longer contains the event that anchor
   recorded — treat it as tamper, not drift.
 - Retention: `GET /api/admin/retention/report` — review `due_for_review`
+  (and `zero_window_retention`: those labels are invalid, so set a window
+  deliberately rather than reading them as "destroy now" — SEC-122)
   (report only; any deletion is a human, audited act, ADR-005).
 - Coverage: `GET /api/soc/rules/coverage` — new `gaps` = active rules that
   never fired (tune rule or add scenario, docs/12).
