@@ -863,11 +863,11 @@ longer skips its existence check, and the constraint net answers documented code
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
 never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
 and timestamps are validated, and the import always reports the run's status),
-300 → 305 (5 new: the lab range registry and its cross-checks ×2, the operator
+300 → 310 (10 new: the lab range registry and its cross-checks ×2, the operator
 self-diagnosis, the baseline security headers, and the doctor's access rule split out),
 ruff clean.
 
-**Current totals:** **305 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **310 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
 SEC-117 series was reproduced first (as a failing check or a live request) and
@@ -1907,3 +1907,56 @@ asserted: it refuses with `{"skipped": true, "reason": "users already exist (dat
 fresh)"}` and the row counts are unchanged, so the target's help text now says exactly
 that. README status, migrations, script/test inventories, doc index and CI description
 corrected to what the repo actually is; `docs/08` gained the short path.
+
+#### SEC-120 — the range's isolation rules were prose, and the registry pointed at the wrong port
+
+`docs/17` states four isolation rules. Prose cannot fail a build, so rule 2 ("changing a
+publish to `0.0.0.0`") would have been enforced by whoever last read the document.
+`tests/test_lab_range_infra.py` now asserts the rules against the committed compose file:
+the range network is `internal: true` and every service joins only it; every publish is
+loopback-prefixed; each target declares `no-new-privileges`, a memory limit and a compose
+profile; and the container names match the registry the platform serves.
+
+Writing it found three real defects:
+
+- **The registry pointed at the wrong port.** The seeded CTF target was registered on
+  `lab-ctf-target-01:8080` — the *platform's* port on the host — while the range publishes
+  `127.0.0.1:8081`. An operator following the registry would have reached the platform
+  instead of the target. Fixed to 8081, and the test now compares every registered port to
+  the published port so a rename, a re-map or a typo cannot slip through again.
+- **The vulnerable containers were set to `restart: unless-stopped`.** A target that comes
+  back by itself after a reboot (or a crash) is a running target nobody asked for — the
+  exact scope drift the coverage check exists to catch, and one it can only see if an
+  operator reported it. `restart: "no"`, with the reasoning next to it.
+- **`labapi.py`'s planted weaknesses were unmarked.** The file now labels each of the four
+  (IDOR, unauthenticated admin route, debug leak, any-password login), states that the
+  data is synthetic literals, and the test asserts all four routes exist — a documentation
+  claim about a deliberately broken file is exactly the kind that rots.
+
+Also structural: `seed_full(conn)` now names the complete demo dataset (base data →
+detection → demo case → SEC-114 extras) instead of that composition living inside
+`if __name__ == "__main__"`, so any caller gets what an operator sees.
+
+Tests: 305 → 310, ruff clean.
+
+#### SEC-121 — "documentation matches implementation" is now a check, not a claim
+
+Acceptance clause 11 was the weakest of the twelve: it was answered by assertion. The
+claims that rot fastest are mechanical, so `scripts/lint_docs.py` now checks them —
+179 invariants, exit 1 on any break, run in CI's backend job and as `make lint-docs`:
+
+- every document in `docs/` is linked from the README index;
+- every repo path a document points at exists (resolved against the repo root, the
+  backend and the frontend, with bare prefixes like `docs/08` allowed to name a file);
+- the test count in the README and in docs/13's "Current totals" equals what
+  `pytest --collect-only` reports (docs/13's *historical* entries are exempt on purpose);
+- every migration in `app/migrations/` is documented;
+- every SPA page in `app/frontend/src/pages/` is listed in docs/11;
+- the README's "runs N jobs" equals the job count in `ci.yml`;
+- every `make <target>` named in a document exists in the Makefile;
+- every compose profile in the range is mentioned in docs/17.
+
+Writing it immediately found three real gaps: **docs/11 never listed the Tradecraft
+page** (15 of 16 pages documented), **`0004_tradecraft.sql` was documented nowhere**, and
+`docs/18-final-status.md` was not in the README index. All three are fixed; docs/04 also
+gained a migration table so the next migration has an obvious home.

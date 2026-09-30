@@ -63,6 +63,9 @@ test:  ## full pytest suite
 lint:  ## ruff over app/, scripts/, tests/
 	cd $(BE) && $(VENV)/bin/ruff check app/ scripts/ tests/
 
+lint-docs:  ## documentation invariants: index, counts, migrations, pages, paths (SEC-121)
+	cd $(BE) && $(VENV)/bin/python -m scripts.lint_docs
+
 rules:  ## every detection rule must be able to fire (SEC-074)
 	cd $(BE) && $(VENV)/bin/python -m scripts.lint_rules
 

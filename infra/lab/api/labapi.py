@@ -1,6 +1,7 @@
 """`lab-api-01` — the range's intentionally broken REST API (SEC-115).
 
-Deliberately vulnerable, deliberately tiny, and deliberately obvious: three
+Synthetic data only: the accounts, the "signing key" and the config below are literals
+in this file. Deliberately vulnerable, deliberately tiny, and deliberately obvious: three
 classic mistakes that the platform's own tooling can then be exercised against
 (IDOR, missing authorization on an admin route, and a debug endpoint that leaks
 the signing key). It exists so an exercise has a target that is *ours* — no
@@ -56,16 +57,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._json({"error": "bad id"}, 400)
             user = USERS.get(uid)
-            # Vulnerability 1 (IDOR): any caller reads any user. There is no
+            # VULNERABLE 1 (IDOR): any caller reads any user. There is no
             # token check *and* no ownership check — both are the point.
             if not user:
                 return self._json({"error": "not found"}, 404)
             return self._json({"user": user, "authorization": "none required (lab)"})
         if path == "/api/admin/config":
-            # Vulnerability 2: an "admin" route with no authorization at all.
+            # VULNERABLE 2: an "admin" route with no authorization at all.
             return self._json({"config": ADMIN_CONFIG, "authorization": "none required (lab)"})
         if path == "/api/debug":
-            # Vulnerability 3: debug endpoint leaking the environment.
+            # VULNERABLE 3: debug endpoint leaking the environment.
             return self._json({"env": dict(os.environ), "note": "lab debug endpoint"})
         if path == "/api/health":
             return self._json({"ok": True, "target": "lab-api-01"})
@@ -81,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(raw or b"{}")
             except json.JSONDecodeError:
                 return self._json({"error": "bad json"}, 400)
-            # Vulnerability 0: any password works, and the token is a constant.
+            # VULNERABLE 4: any password works, and the token is a constant.
             return self._json({"token": "lab-token", "role": USERS[1]["role"],
                                "note": "any credentials are accepted (lab)"})
         return self._json({"error": "not found"}, 404)

@@ -531,7 +531,9 @@ def seed_lab_extras(conn) -> dict:
 
     # ---- lab range registration + the authorized exercise that covers it (SEC-115)
     lab_targets = [
-        ("lab-ctf-target-01", "web", "lab-ctf-target-01:8080", "ctf", "medium",
+        # Endpoints record where an operator reaches the target: the loopback publish
+        # from infra/lab/docker-compose.yml (8081 -> DVWA's :80 inside the range).
+        ("lab-ctf-target-01", "web", "lab-ctf-target-01:8081", "ctf", "medium",
          "Deliberately vulnerable web app image (OWASP-style challenges)."),
         ("lab-juice-01", "web", "lab-juice-01:3000", "owasp", "high",
          "Juice Shop-style target for AppSec practice."),
@@ -679,20 +681,32 @@ def seed_lab_extras(conn) -> dict:
     return out
 
 
+def seed_full(conn) -> dict:
+    """The complete demo dataset, in order: base data, detection, the demo case, extras.
+
+    `seed_all` alone leaves the dataset without alerts (detection has to run over the
+    events) and without the SEC-114 surfaces. Anything wanting the dataset an operator
+    sees should call this; pytest fixtures that need a narrower dataset call the steps
+    they need directly.
+    """
+    out = seed_all(conn)
+    if out.get("skipped"):
+        return out
+    # Run detection over the seeded events and create the linked demo case, so a fresh
+    # install has alerts + a case out of the box.
+    from ..routers.soc import _run_detections
+    events = db.q(conn, "SELECT id, ts, host, user, action, outcome, severity, "
+                        "source_name, source_type, data FROM events ORDER BY ts")
+    if events:
+        out["alerts"] = len(_run_detections(conn, events, threshold_context=events))
+    out["demo_case"] = demo_case_and_evidence(conn)
+    # SEC-114: reports/schedules/tradecraft/lab targets/release/saved searches.
+    out["lab_extras"] = seed_lab_extras(conn)
+    return out
+
+
 if __name__ == "__main__":
     conn = db.raw_connection()
-    out = seed_all(conn)
-    if not out.get("skipped"):
-        # Run detection over the seeded events and create the linked demo case,
-        # so a fresh install has alerts + a case out of the box.
-        from ..routers.soc import _run_detections
-        events = db.q(conn, "SELECT id, ts, host, user, action, outcome, severity, "
-                            "source_name, source_type, data FROM events ORDER BY ts")
-        if events:
-            raised = _run_detections(conn, events, threshold_context=events)
-            out["alerts"] = len(raised)
-        out["demo_case"] = demo_case_and_evidence(conn)
-        # SEC-114: reports/schedules/tradecraft/lab targets/release/saved searches.
-        out["lab_extras"] = seed_lab_extras(conn)
+    out = seed_full(conn)
     conn.close()
     print(json.dumps(out, indent=2))

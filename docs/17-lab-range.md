@@ -78,7 +78,7 @@ GET  /api/debug          -> dumps the environment, including a fake signing key
 POST /api/login          -> any password is accepted
 ```
 
-## Isolation rules (do not edit casually)
+## Isolation rules (do not edit casually — `tests/test_lab_range_infra.py` asserts them)
 
 1. Everything joins `lab_range`, declared `internal: true` — containers reach each other
    and nothing else. There is no route from the range to the platform network or the

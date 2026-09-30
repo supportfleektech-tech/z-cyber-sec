@@ -37,6 +37,7 @@ The backend serves `dist/` automatically when it exists
 | `Grc` | `/api/grc/controls*`, `/risks*` | Control status + evidence, risk register with likelihood×impact score recomputation |
 | `Exercises` | `/api/exercises*` | Authorized red-team/CTF flows: planned→authorized→running→completed (reason required on completion); detail modal with run log |
 | `Lab` | `/api/lab/*` | Range registry: targets with kind/exposure/status, the four coverage counters, per-target scope and the cross-checks (SEC-115) |
+| `Tradecraft` | `/api/tradecraft/*` | Exploitability review queue (verdict + evidence, triage-ready), attack chains with validation status, duplicate fingerprints, the persona/rubric, and the scope check |
 | `Agents` | `/api/agents*` | Pending approval queue with approve/reject + comment, task queue with tool-call trace, agent allowlists, tool registry, evals runner |
 | `Automation` | `/api/automation*` | Playbook list with **dry run** (plan preview, nothing executes) and gated run, execution history |
 | `Reports` | `/api/reports*` | Generated reports with input row count + `input_sha256` provenance; kind filter; download (requires `reports.generate`) |

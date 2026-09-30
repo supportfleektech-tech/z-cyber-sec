@@ -49,6 +49,11 @@ jobs:
           pip install -r requirements.txt
       - name: Lint (ruff)
         run: ruff check app/ scripts/ tests/
+      - name: Validate documentation invariants (SEC-121)
+        # Acceptance clause 11 is "documentation matches implementation": the index, the
+        # test count, the migration list, the SPA page inventory and every repo path a
+        # document points at are checked mechanically.
+        run: python -m scripts.lint_docs
       - name: Validate detection rules (SEC-074)
         # A rule outside the engine's Sigma subset would be stored as 'active'
         # and never fire. Fail the build instead of shipping an inert rule.

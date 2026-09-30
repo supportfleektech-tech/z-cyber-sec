@@ -30,19 +30,22 @@ services:
   lab-juice-01:
     image: bkimminich/juice-shop:latest
     profiles: ["juice"]
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "127.0.0.1:3000:3000"
     networks: [lab_range]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 512m
     # Vulnerable by design: no healthcheck that could imply it is safe to expose.
+    # restart is "no" on purpose: a target that comes back by itself after a reboot
+    # is a running target nobody asked for — scope drift the coverage check can only
+    # see if an operator told it (docs/17, pinned by tests/test_lab_range_infra.py).
 
   # A second web target for CTF-style exercises (OWASP-style challenges).
   lab-ctf-target-01:
     image: vulnerables/web-dvwa:latest
     profiles: ["ctf"]
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "127.0.0.1:8081:80"
     environment:
@@ -58,7 +61,7 @@ services:
   lab-api-01:
     image: python:3.11-alpine
     profiles: ["api"]
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "127.0.0.1:8001:8001"
     networks: [lab_range]

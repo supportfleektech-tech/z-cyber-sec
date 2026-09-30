@@ -5,6 +5,7 @@ Zero-budget, local-first. Three layers, from least to most hardened:
 | Layer | Path | What it does |
 |---|---|---|
 | Local dev | `infra/compose/compose.yaml` | Single container, host port 8080, named volume for `data/`. For day-to-day. |
+| Lab range | `infra/lab/` | The vulnerable training targets (Juice Shop, DVWA, `lab-api-01`) on an `internal: true` network with loopback-only publishes, selected by compose profile. Registered in the platform as `lab_targets`; docs/17. |
 | Target-host network | `infra/network/` | nftables flow matrix (mgmt/app/lab-targets zones) + validator. Applied **on the target host only**. |
 | Staging | `infra/staging/` | Separate stack (own volume + network), HTTP-only on the staging LAN, same image as prod. Acceptance environment (SEC-060). |
 | Production | `infra/prod/` | Docker image + Caddy TLS edge + hardened env. Built, not yet deployed (ADR-007). |

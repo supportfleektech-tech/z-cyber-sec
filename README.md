@@ -1,7 +1,7 @@
 # CYBER-SEC — Cybersecurity Engineering & Intelligence Lab
 
 **Status:** Implemented v1.0 (modular monolith + React SPA), local-first, zero-budget.
-**Verified:** 305/305 backend tests, ruff clean, SPA builds + served, 214-check live
+**Verified:** 310/310 backend tests, ruff clean, SPA builds + served, 214-check live
 smoke, acceptance clauses 10 demonstrated / 2 host-ops / 0 failed, backup/restore
 rehearsal PASS — see `docs/13-verification-evidence.md` for the full evidence log
 (commands, timestamps, limitations).
@@ -32,7 +32,7 @@ Everything routine has a target (run `make help` for the list):
 ```bash
 make lab     # venv + deps + SPA build + seeded database, then start it with:
 make run     # http://localhost:8080
-make test    # 305 tests          make smoke   # live surface + RBAC (instance must be up)
+make test    # 310 tests          make smoke   # live surface + RBAC (instance must be up)
 make accept  # acceptance clauses make doctor  # the app's own self-diagnosis
 make lab-up  # the vulnerable training range (docker, loopback-only)
 ```
@@ -78,7 +78,7 @@ app/backend/
                          # (SEC-116), lint_rules (SEC-074), backup_rehearsal (SEC-063),
                          # load_test (SEC-043)
   scenarios/             # purple-team synthetic-attack scenarios (pt-*.yaml, SEC-072)
-  tests/                 # 305 tests: auth, RBAC, detection, intel, agents, e2e, extensions, ...
+  tests/                 # 310 tests: auth, RBAC, detection, intel, agents, e2e, extensions, ...
   Dockerfile             # multi-stage prod image (non-root, pinned deps, healthcheck)
 app/frontend/            # React 18 + TS + Vite SPA (served by backend)
 docs/                    # 00–10 design/ops, 11 frontend, 12 API reference, 13 evidence,
@@ -134,7 +134,7 @@ CI runs both against a freshly seeded instance in the `live` job.
 ## Tests & CI
 
 ```bash
-cd app/backend && .venv/bin/python -m pytest -q          # 305 tests
+cd app/backend && .venv/bin/python -m pytest -q          # 310 tests
 cd app/backend && .venv/bin/ruff check app/ scripts/ tests/
 cd app/backend && .venv/bin/python -m scripts.lint_rules # every rule can fire
 cd app/frontend && npm run build                         # tsc -b && vite build
@@ -167,6 +167,7 @@ build), supply-chain (SBOM + pip-audit + npm audit).
 | [15](docs/15-detection-rules.md) | Detection rule subset, validation & Sigma porting guide (SEC-074) |
 | [16](docs/16-adversary-tradecraft.md) | Adversary tradecraft — The-Xploiter persona, scope guard, chains, triage reporting (SEC-075) |
 | [17](docs/17-lab-range.md) | Lab range — registered training targets, coverage cross-checks, isolation rules (SEC-115) |
+| [18](docs/18-final-status.md) | Final status report — verdict, exact paths, the twelve acceptance clauses, and the acts left to the target host |
 | [ADR 001–008](docs/adr/) | Framework, auth, SIEM, schema/contracts, evidence, secrets, production, capacity/extraction |
 
 Roadmap & phase gates: [`planning/roadmap.md`](planning/roadmap.md) ·
