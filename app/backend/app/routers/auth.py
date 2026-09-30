@@ -1,6 +1,8 @@
 """Auth: login/logout/me + user administration (admin only)."""
 from __future__ import annotations
 
+import json
+import logging
 import sqlite3
 import time
 
@@ -78,10 +80,42 @@ def login(body: LoginIn, request: Request, response: Response,
                         max_age=security.token_ttl_seconds(), **cookie_kwargs)
     body: dict = {"user": security.user_public(user)}
     if expose_token:
+        # Two carriers on purpose (SEC-124d): whatever a proxy does to the body, the
+        # header survives, and vice versa. Both are the same opaque token and both are
+        # only exposed in lab-like environments — STAGING/PROD keep httpOnly-only sessions.
         body["session_token"] = token
         body["session_transport"] = "cookie+bearer (lab mode: the token in this body is " \
                                     "for the SPA's Authorization header)"
+        response.headers["X-Session-Token"] = token
+        response.headers["Access-Control-Expose-Headers"] = "X-Session-Token"
     return body
+
+
+class ClientReportIn(BaseModel):
+    """What the browser saw, when it could not keep a session (SEC-124d)."""
+
+    stage: str = Field(max_length=60)
+    detail: dict = Field(default_factory=dict)
+
+
+@router.post("/client-report", status_code=202)
+def client_report(body: ClientReportIn, request: Request):
+    """Diagnostic sink for the login page (lab-like environments only).
+
+    A session that cannot be kept is a browser-policy question, and the only machine that
+    can answer it is the browser. The SPA posts what it observed — response shape, keys,
+    content type, storage availability — and it lands in the server log, where it can be
+    read next to the request that caused it. Nothing here is stored, and the report is
+    constrained to describe the *shape* of things: the login page never sends the token,
+    a password, or any response body content.
+    """
+    if settings.env_name in ("STAGING", "PROD"):
+        raise HTTPException(404, {"code": "not_found"})
+    client_ip = request.client.host if request.client else "unknown"
+    logging.getLogger("uvicorn.error").info(
+        "client-report %s from %s | %s", body.stage, client_ip,
+        json.dumps(body.detail, separators=(",", ":"), default=str)[:600])
+    return {"received": True}
 
 
 @router.post("/logout")

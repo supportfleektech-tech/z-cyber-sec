@@ -99,7 +99,108 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   if (res.status === 204) return undefined as T;
   const ct = res.headers.get("content-type") || "";
-  return (ct.includes("application/json") ? res.json() : res.text()) as Promise<T>;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  // SEC-124d: parse as JSON when it *is* JSON, not merely when the header says so — an
+  // intermediary is free to rewrite Content-Type, and treating a JSON body as text cost
+  // the session token (login 200, every later call 401).
+  const looksJson = ct.includes("json") || /^[[{]/.test(text.trim());
+  if (looksJson) {
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      /* not actually JSON; fall through to text */
+    }
+  }
+  return text as T;
+}
+
+/**
+ * Login (SEC-124d). Reads the token from the response *header* as well as the body: the
+ * two are independent carriers, and a body a proxy rewrote should not cost the session.
+ * When neither is present the page reports what it saw to the server (lab-like only) so
+ * the cause is visible in the log rather than guessed at.
+ */
+export async function login(username: string, password: string): Promise<{ token: string | null }> {
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const text = await res.text();
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    const detail = (body?.detail ?? null) as { code?: string; message?: string } | null;
+    throw new ApiError(res.status, detail?.code || "error",
+                       detail?.message || res.statusText || `HTTP ${res.status}`);
+  }
+  const header = res.headers.get("X-Session-Token");
+  const token = (body?.session_token as string | undefined) ?? header ?? null;
+  session.keep(token ?? undefined);
+  if (!token) {
+    // Shape only — never the body's contents, the password, or any token.
+    void report("login-response-without-token", {
+      content_type: res.headers.get("content-type") || null,
+      body_was_json: body !== null,
+      body_type: body === null ? typeof text : "object",
+      keys: body ? Object.keys(body).slice(0, 12) : [],
+      header_present: header !== null,
+      storage: storageAvailability(),
+    });
+  }
+  return { token };
+}
+
+/** What this browser allows, for the diagnostic report (SEC-124d). */
+export function storageAvailability() {
+  const probe = (get: () => Storage) => {
+    try {
+      const store = get();
+      const k = "__probe__";
+      store.setItem(k, "1");
+      store.removeItem(k);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    local: probe(() => window.localStorage),
+    session: probe(() => window.sessionStorage),
+    cookie: (() => {
+      try {
+        return navigator.cookieEnabled && document.cookie !== undefined;
+      } catch {
+        return false;
+      }
+    })(),
+    third_party_blocked: (() => {
+      try {
+        return !window.top || window.top !== window.self;
+      } catch {
+        return true;               // cross-origin ancestor: we are inside someone's frame
+      }
+    })(),
+  };
+}
+
+async function report(stage: string, detail: Record<string, unknown>) {
+  try {
+    await fetch("/api/auth/client-report", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, detail }),
+    });
+  } catch {
+    /* a diagnostic must never be the thing that breaks */
+  }
 }
 
 export const api = {

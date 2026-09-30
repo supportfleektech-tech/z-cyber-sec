@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, session } from "../api";
+import { api, login, session } from "../api";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -8,6 +8,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [volatileSession, setVolatile] = useState(false);
   const navigate = useNavigate();
 
   const submit = async (e: FormEvent) => {
@@ -15,10 +16,9 @@ export default function Login() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api.post<{ session_token?: string }>("/api/auth/login", { username, password });
-      // Preview/embedded contexts receive a token (SEC-124); production sends none and
-      // the httpOnly cookie is the only transport.
-      session.keep(res?.session_token);
+      // SEC-124d: `login` reads the token from the body *and* the response header, and
+      // reports the response's shape to the server when neither is present.
+      await login(username, password);
       // Prove the session survived before navigating: a browser that refuses cookies
       // *and* storage would otherwise bounce straight back here from /overview with no
       // explanation (SEC-124c).
@@ -28,7 +28,9 @@ export default function Login() {
         setBlocked(true);
         return;
       }
-      if (session.volatileOnly()) setBlocked(true);
+      // Storage refused but the in-memory token works: the app is usable in this tab, and
+      // the notice says what the one limitation is (a reload costs a fresh login).
+      if (session.volatileOnly()) setVolatile(true);
       navigate("/overview");
     } catch (err) {
       setError((err as Error).message);
@@ -43,6 +45,25 @@ export default function Login() {
         <h1>🛡 CYBER-SEC</h1>
         <div className="sub">Security operations console — local lab (synthetic data)</div>
         {error && <div className="error-box">{error}</div>}
+        {volatileSession && (
+          <div className="note-box">
+            <b>Signed in — this tab only.</b>
+            <div className="mt">
+              This browser blocks cookies and storage for embedded pages, so the session
+              lives in memory: it works until the page is reloaded. Open the console in its
+              own tab for a session that survives a refresh.
+            </div>
+            <div className="mt">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => window.open(window.location.href, "_blank", "noopener")}
+              >
+                Open in a new tab
+              </button>
+            </div>
+          </div>
+        )}
         {blocked && (
           <div className="error-box">
             <b>Signed in, but this browser kept no session.</b>

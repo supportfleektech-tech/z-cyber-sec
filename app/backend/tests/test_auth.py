@@ -253,3 +253,52 @@ def test_local_loopback_login_keeps_a_same_site_cookie(client):
     assert r.status_code == 200
     cookie = r.headers["set-cookie"]
     assert "SameSite=strict" in cookie and "Secure" not in cookie
+
+
+def test_lab_login_exposes_the_token_in_a_header_too(client):
+    """SEC-124d: the body and the header are independent carriers. A proxy that rewrites
+    the body must not cost the session — the SPA reads the header as a fallback."""
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"},
+                    headers={"host": "8080-abc.e2b.app"})
+    assert r.status_code == 200
+    header_token = r.headers.get("X-Session-Token")
+    assert header_token and header_token == r.json()["session_token"]
+    assert r.headers["Access-Control-Expose-Headers"] == "X-Session-Token"
+    # It authenticates on its own, without the cookie.
+    client.cookies.clear()
+    me = client.get("/api/auth/me", headers={"authorization": f"Bearer {header_token}"})
+    assert me.status_code == 200 and me.json()["username"] == "admin"
+
+
+def test_client_report_is_a_lab_only_diagnostic(client, caplog):
+    """The only machine that can explain a blocked session is the browser; it reports the
+    *shape* of what it saw, and the report is not available in a hardened environment."""
+    r = client.post("/api/auth/client-report",
+                    json={"stage": "login-response-without-token",
+                          "detail": {"keys": ["user"], "content_type": "text/plain"}})
+    assert r.status_code == 202 and r.json()["received"] is True
+
+    from app.config import settings
+    original = settings.env_name
+    settings.env_name = "PROD"
+    try:
+        assert client.post("/api/auth/client-report", json={"stage": "x"}).status_code == 404
+    finally:
+        settings.env_name = original
+
+
+def test_production_never_exposes_a_token(client):
+    """The relaxation is scoped: a hardened environment keeps httpOnly-only sessions."""
+    from app.config import settings
+    original = settings.env_name
+    settings.env_name = "PROD"
+    try:
+        client.post("/api/auth/logout")
+        r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
+        assert r.status_code == 200
+        assert "session_token" not in r.json()
+        assert "X-Session-Token" not in r.headers
+        assert "SameSite=strict" in r.headers["set-cookie"]
+    finally:
+        settings.env_name = original
