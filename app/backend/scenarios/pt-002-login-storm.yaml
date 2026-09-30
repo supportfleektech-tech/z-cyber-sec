@@ -1,0 +1,21 @@
+# Purple-team scenario — application login storm (validates rule cs-0002)
+# Rule cs-0002: >=10 login_failed for one user within 300s (T1110.003).
+uid: pt-002
+name: Application Login Storm
+description: >
+  Twelve failed web logins for a single user within two minutes
+  (credential stuffing pattern, MITRE T1110.003). Expect rule cs-0002.
+expected_rule: cs-0002
+events:
+  - {offset: 0,   host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 10,  host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 20,  host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 30,  host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 40,  host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 50,  host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 60,  host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 70,  host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 80,  host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 90,  host: pt-web-01, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 100, host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}
+  - {offset: 110, host: pt-web-02, user: j.violet, action: login_failed, outcome: failure, severity: low, source_name: httpd, msg: "login failure /web/login"}

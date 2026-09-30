@@ -1,0 +1,18 @@
+# Sigma-subset rule (free model, see ADR-003 / services/detection.py)
+uid: cs-0001
+name: SSH Brute Force
+description: >
+  Repeated failed SSH logins against a single host within a short window.
+  Borrowed concept: Wazuh 5712 / MITRE T1110 (Brute Force).
+severity: high
+status: active
+detection:
+  fail:
+    action: ssh_failed_login
+    outcome: failure
+  provider:
+    source_name: sshd
+condition: fail and provider
+timeframe: 300
+threshold: 5
+entity: host

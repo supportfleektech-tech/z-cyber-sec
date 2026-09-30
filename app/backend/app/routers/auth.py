@@ -1,0 +1,213 @@
+"""Auth: login/logout/me + user administration (admin only)."""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+
+from .. import db, ratelimit, security
+from ..audit import record_audit
+from ..config import settings
+from ..deps import get_current_user, require
+
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/login")
+def login(body: LoginIn, request: Request, response: Response,
+          conn: sqlite3.Connection = Depends(db.get_conn)):
+    # SEC-073: brute-force hygiene in the app (the stock Caddy image cannot
+    # run the `rate_limit` directive — see app/ratelimit.py). The client IP is
+    # the real one behind the edge: ForwardedHeadersMiddleware rewrites
+    # scope["client"] from the trusted proxy hop.
+    client_ip = request.client.host if request.client else "unknown"
+    if settings.login_rate_limit_enabled and settings.login_rate_limit > 0:
+        now = time.monotonic()
+        key = f"login:{client_ip}"
+        allowed, retry_after = ratelimit.check(
+            key, limit=settings.login_rate_limit,
+            window_s=settings.login_rate_limit_window_s, now=now)
+        if not allowed:
+            wait = int(retry_after) + 1
+            if ratelimit.should_log(key, window_s=settings.login_rate_limit_window_s, now=now):
+                record_audit(conn, {"type": "user", "id": None, "name": body.username},
+                             "auth.rate_limited", target_type="ip", target_id=client_ip,
+                             detail={"retry_after_s": wait,
+                                     "limit": settings.login_rate_limit,
+                                     "window_s": settings.login_rate_limit_window_s})
+            raise HTTPException(
+                status_code=429,
+                detail={"code": "rate_limited",
+                        "message": f"Too many login attempts; retry in {wait}s."},
+                headers={"Retry-After": str(wait)},
+            )
+    user = db.one(conn, "SELECT *, id AS user_id FROM users WHERE username = ?", (body.username,))
+    if not user or not user["active"] or not security.verify_password(body.password, user["password_hash"]):
+        record_audit(conn, {"type": "user", "id": None, "name": body.username},
+                     "auth.failed", target_type="user", target_id=body.username)
+        # Generic message: no user-existence oracle.
+        raise HTTPException(status_code=401, detail={"code": "invalid_credentials"})
+    session_id, token = security.create_session(
+        conn, user["id"], request.client.host if request.client else None,
+        request.headers.get("user-agent"))
+    record_audit(conn, {"type": "user", "id": str(user["id"]), "name": user["username"]},
+                 "auth.login", target_type="session", target_id=str(session_id))
+    # SEC-124: the cookie's attributes must match the scheme the *browser* used (a
+    # proxy terminates TLS, so the app itself sees http), and in a lab-like environment
+    # the same token is also returned in the body for the SPA to carry as a bearer
+    # token — an embedded preview cannot rely on cookies at all.
+    scheme = security.effective_scheme(request.url.scheme,
+                                       request.headers.get("x-forwarded-proto"))
+    lab_like = settings.env_name not in ("STAGING", "PROD")
+    # SEC-124c: in a lab, "the caller is not on this machine" is the fact that matters —
+    # it implies a proxy, which implies the browser may be cross-site. Relying on the
+    # scheme alone breaks whenever a preview proxy omits X-Forwarded-Proto.
+    remote = security.reached_through_a_proxy(request.headers) or \
+        not security.is_loopback_host(request.headers.get("host"))
+    https = scheme == "https" or (lab_like and remote)
+    cookie_kwargs, expose_token = security.session_cookie_policy(
+        settings.env_name, https, settings.cookie_secure)
+    response.set_cookie(security.COOKIE_NAME, token,
+                        max_age=security.token_ttl_seconds(), **cookie_kwargs)
+    body: dict = {"user": security.user_public(user)}
+    if expose_token:
+        # Two carriers on purpose (SEC-124d): whatever a proxy does to the body, the
+        # header survives, and vice versa. Both are the same opaque token and both are
+        # only exposed in lab-like environments — STAGING/PROD keep httpOnly-only sessions.
+        body["session_token"] = token
+        body["session_transport"] = "cookie+bearer (lab mode: the token in this body is " \
+                                    "for the SPA's Authorization header)"
+        response.headers["X-Session-Token"] = token
+        response.headers["Access-Control-Expose-Headers"] = "X-Session-Token"
+    return body
+
+
+class ClientReportIn(BaseModel):
+    """What the browser saw, when it could not keep a session (SEC-124d)."""
+
+    stage: str = Field(max_length=60)
+    detail: dict = Field(default_factory=dict)
+
+
+@router.post("/client-report", status_code=202)
+def client_report(body: ClientReportIn, request: Request):
+    """Diagnostic sink for the login page (lab-like environments only).
+
+    A session that cannot be kept is a browser-policy question, and the only machine that
+    can answer it is the browser. The SPA posts what it observed — response shape, keys,
+    content type, storage availability — and it lands in the server log, where it can be
+    read next to the request that caused it. Nothing here is stored, and the report is
+    constrained to describe the *shape* of things: the login page never sends the token,
+    a password, or any response body content.
+    """
+    if settings.env_name in ("STAGING", "PROD"):
+        raise HTTPException(404, {"code": "not_found"})
+    client_ip = request.client.host if request.client else "unknown"
+    logging.getLogger("uvicorn.error").info(
+        "client-report %s from %s | %s", body.stage, client_ip,
+        json.dumps(body.detail, separators=(",", ":"), default=str)[:600])
+    return {"received": True}
+
+
+@router.post("/logout")
+def logout(response: Response, user: dict = Depends(get_current_user),
+           conn: sqlite3.Connection = Depends(db.get_conn)):
+    security.revoke_session(conn, user["id"])  # session row id
+    record_audit(conn, {"type": "user", "id": str(user["user_id"]), "name": user["username"]},
+                 "auth.logout", target_type="session", target_id=str(user["id"]))
+    response.delete_cookie(security.COOKIE_NAME)
+    return {"ok": True}
+
+
+@router.get("/me")
+def me(user: dict = Depends(get_current_user)):
+    return security.user_public(user)
+
+
+# ------------------------------------------------------------ user management
+
+class UserIn(BaseModel):
+    username: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9._-]+$")
+    password: str = Field(min_length=8, max_length=200)
+    display_name: str | None = Field(default=None, max_length=100)
+    role: str = "viewer"
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    active: bool | None = None
+
+
+@router.post("/users", status_code=201)
+def create_user(body: UserIn, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("admin.users"))):
+    if body.role not in security.ROLES:
+        raise HTTPException(400, {"code": "bad_role",
+                                  "message": f"role must be one of {sorted(security.ROLES)}"})
+    if db.one(conn, "SELECT id FROM users WHERE username = ?", (body.username,)):
+        raise HTTPException(409, {"code": "exists"})
+    now = db.utcnow()
+    cur = conn.execute(
+        "INSERT INTO users (username, display_name, password_hash, role, active, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (body.username, body.display_name, security.hash_password(body.password), body.role, now, now),
+    )
+    conn.commit()
+    record_audit(conn, {"type": "user", "id": str(user["user_id"]), "name": user["username"]},
+                 "user.created", target_type="user", target_id=str(cur.lastrowid),
+                 detail={"username": body.username, "role": body.role})
+    return {"id": int(cur.lastrowid), "username": body.username, "role": body.role}
+
+
+@router.get("/users")
+def list_users(conn: sqlite3.Connection = Depends(db.get_conn),
+               user: dict = Depends(require("admin.users"))):
+    rows = db.q(conn, "SELECT id, username, display_name, role, active, created_at FROM users ORDER BY username")
+    return {"items": rows, "total": len(rows)}
+
+
+@router.patch("/users/{uid}")
+def update_user(uid: int, body: UserUpdate, conn: sqlite3.Connection = Depends(db.get_conn),
+                user: dict = Depends(require("admin.users"))):
+    target = db.one(conn, "SELECT * FROM users WHERE id = ?", (uid,))
+    if not target:
+        raise HTTPException(404, {"code": "not_found"})
+    if body.role is not None and body.role not in security.ROLES:
+        raise HTTPException(400, {"code": "bad_role"})
+    # Self-lockout guard: cannot demote/deactivate the last active admin.
+    if target["role"] == "admin" and (body.active is False or (body.role is not None and body.role != "admin")):
+        others = db.one(conn, "SELECT COUNT(*) c FROM users WHERE role='admin' AND active=1 AND id != ?", (uid,))
+        if int(others["c"]) == 0:
+            raise HTTPException(400, {"code": "last_admin",
+                                      "message": "Cannot remove the last active admin."})
+    fields, params = [], []
+    if body.display_name is not None:
+        fields.append("display_name = ?")
+        params.append(body.display_name)
+    if body.role is not None:
+        fields.append("role = ?")
+        params.append(body.role)
+    if body.active is not None:
+        fields.append("active = ?")
+        params.append(int(body.active))
+    if not fields:
+        raise HTTPException(400, {"code": "no_changes"})
+    fields.append("updated_at = ?")
+    params.append(db.utcnow())
+    params.append(uid)
+    conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    record_audit(conn, {"type": "user", "id": str(user["user_id"]), "name": user["username"]},
+                 "user.updated", target_type="user", target_id=str(uid),
+                 detail={k: v for k, v in body.model_dump().items() if v is not None})
+    return db.one(conn, "SELECT id, username, display_name, role, active FROM users WHERE id = ?", (uid,))

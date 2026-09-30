@@ -1,0 +1,76 @@
+# CYBER-SEC staging/production stack (ADR-007, SEC-060/061).
+#
+#   staging:  ENV_NAME=STAGING, HTTP-only on an internal port (no public DNS)
+#   prod:     ENV_NAME=PROD, TLS via Caddy (ACME, automatic)
+#
+# Zero-budget: official public images only (caddy:2). The app image is built
+# locally from app/backend/Dockerfile. Run from the repo root:
+#
+#   docker build -f app/backend/Dockerfile -t cybersec:local .
+#   docker compose -f infra/prod/docker-compose.yml --profile staging up -d
+#   docker compose -f infra/prod/docker-compose.yml --profile prod up -d
+#
+# Secrets: copy .env.example.prod -> .env and set real values; the app refuses
+# to boot in STAGING/PROD with the dev SECRET_KEY (ADR-006 boot guard).
+
+services:
+  cybersec:
+    image: cybersec:local
+    build:
+      # context = repo root (Dockerfile COPYs app/backend + app/frontend paths)
+      context: ../..
+      dockerfile: app/backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /var/lib/cybersec
+      TOKEN_TTL_HOURS: ${TOKEN_TTL_HOURS:-4}
+    volumes:
+      - cybersec-data:/var/lib/cybersec
+    ports:
+      - "${INTERNAL_BIND_ADDR:-127.0.0.1}:${INTERNAL_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/healthz', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    # Resource limits (SEC-041) — tune per host
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks: [cybersec]
+
+  # Staging: no TLS — plain reverse proxy is unnecessary; access via the
+  # internal bind address. Keep the profile for a future ingress hop.
+  caddy:
+    image: caddy:2
+    profiles: ["prod"]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${PROD_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - cybersec
+    networks: [cybersec]
+
+volumes:
+  cybersec-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  cybersec:
+    driver: bridge

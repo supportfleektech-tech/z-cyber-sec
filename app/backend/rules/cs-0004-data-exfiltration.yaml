@@ -1,0 +1,14 @@
+uid: cs-0004
+name: Potential Data Exfiltration
+description: >
+  Large outbound transfer (>100 MB) to a non-allowlisted destination.
+  MITRE T1041 (Exfiltration Over C2 Channel).
+severity: critical
+status: active
+detection:
+  big:
+    action: network_out
+    data.bytes_out: {op: gt, value: 100000000}
+  external:
+    data.dst_ip: ["203.0.113.66", "198.51.100.9"]
+condition: big and external

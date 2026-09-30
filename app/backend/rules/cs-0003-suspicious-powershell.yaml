@@ -1,0 +1,13 @@
+uid: cs-0003
+name: Suspicious PowerShell Execution
+description: >
+  PowerShell with encoded/obfuscated payload patterns. MITRE T1059.001 / T1027.
+severity: high
+status: active
+detection:
+  exec:
+    action: process_create
+    data.program: powershell
+  obfuscated:
+    data.flags: ["-enc", "-en", "DownloadString", "IEX", "FromBase64String"]
+condition: exec and obfuscated

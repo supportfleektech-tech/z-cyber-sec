@@ -5,6 +5,12 @@
 - **Platform:** frontend, API, database, workers, monitoring.
 - **Blue-team telemetry:** collectors, SIEM, dashboards.
 - **Exercise:** disposable targets and authorized simulations.
+- **Lab range (`lab_range`, `internal: true`):** the containers that *are* the exercise
+  targets — Juice Shop, the CTF target, `lab-api-01` (`infra/lab/docker-compose.yml`).
+  Loopback-only publishes, no route to the platform network or the internet, registered
+  in the platform as `lab_targets` and cross-checked by `GET /api/lab/coverage`
+  (docs/17). These invariants are pinned by `tests/test_lab_range_infra.py`, not by
+  prose.
 - **External egress:** explicitly approved updates, feeds, and APIs.
 - **Production:** separate environment; never bridged casually to exercises.
 

@@ -1,0 +1,15 @@
+uid: cs-0002
+name: Application Login Storm
+description: >
+  Many failed logins for one user in a short window (credential stuffing or
+  guessing). MITRE T1110.003.
+severity: medium
+status: active
+detection:
+  fail:
+    action: login_failed
+    outcome: failure
+condition: fail
+timeframe: 300
+threshold: 10
+entity: user

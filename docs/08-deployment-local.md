@@ -1,5 +1,18 @@
 # Local Deployment Runbook
 
+## First (the short path)
+
+```bash
+make lab     # venv + pinned deps + SPA build + seeded synthetic database
+make run     # serve the app + SPA on http://localhost:8080 (Ctrl-C to stop)
+```
+
+`make help` lists the rest: `make test`, `make lint`, `make rules`, `make smoke`,
+`make accept`, `make doctor`, `make backup-drill`, `make lab-up` / `lab-down`,
+`make reseed-reset` (the only destructive target, and it asks first). The manual
+sequence below is what those targets do, spelled out for a host where `make` is not
+available or where each step needs review.
+
 ## Before deployment
 - Complete host audit and capacity check.
 - Identify conflicts with existing ports, networks, volumes, and containers.

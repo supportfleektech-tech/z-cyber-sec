@@ -1,3 +1,12 @@
+> **Status at a glance (2026-09-26).** This document records where the requirement
+> package came from and is kept as its historical baseline. Everything below that could
+> be revalidated inside the build environment *has since been* — `docs/13-verification-
+> evidence.md` carries the command, environment, timestamp and observed result for each
+> claim, `planning/roadmap.md` marks the phases whose remaining acts need the target host
+> as code-complete (never as done), and `scripts/acceptance_check.py` prints the same
+> verdict per acceptance clause. Nothing in this file should be read as "still unverified"
+> without checking those three.
+
 # Source Basis, Provenance & Status
 
 ## Source-derived / previously established scope

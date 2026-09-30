@@ -1,0 +1,34 @@
+# Caddy TLS edge for CYBER-SEC production (SEC-061).
+# ACME automatic (HTTP-01) — zero-budget, no self-signed, no manual certs.
+#
+# STOCK IMAGE ONLY. This file loads on the official `caddy:2` image used by
+# infra/prod/docker-compose.yml. Caddy's `rate_limit` directive is NOT part of
+# the standard build (it requires a custom xcaddy image and a stock `caddy:2`
+# container rejects the file with "unknown directive: rate_limit"), so login
+# brute-force limiting is enforced in the app instead — app/ratelimit.py,
+# SEC-073 — where it is testable and works in every deployment. An optional
+# second, edge-level layer is documented in infra/README.md.
+$DOMAIN {
+	encode gzip zstd
+
+	# /metrics is platform posture data (open alert counts by severity, DB
+	# size, session counts). The app binds to the internal address only, so
+	# scrape it from the host or the internal network:
+	#   curl -s http://127.0.0.1:8080/metrics
+	# It is never served on the public edge.
+	@metrics path /metrics
+	respond @metrics 403
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy cybersec:8080 {
+		# Preserve the real client for the app's per-IP login limiter and
+		# session attribution (ForwardedHeadersMiddleware trusts one hop).
+		header_up X-Real-IP {http.request.remote.host}
+	}
+}
