@@ -126,7 +126,7 @@ exact command to run there:
 
 ```bash
 cd app/backend && .venv/bin/python -m scripts.acceptance_check
-# 10 demonstrated · 2 host-ops · 0 failed   (dataset 5239d09217b2ede0)
+# 10 demonstrated · 2 host-ops · 0 failed   (dataset <sha256 of the tested DB>)
 ```
 
 CI runs both against a freshly seeded instance in the `live` job.
