@@ -65,8 +65,15 @@ def login(body: LoginIn, request: Request, response: Response,
     # token — an embedded preview cannot rely on cookies at all.
     scheme = security.effective_scheme(request.url.scheme,
                                        request.headers.get("x-forwarded-proto"))
-    https = scheme == "https"
-    cookie_kwargs, expose_token = security.session_cookie_policy(settings.env_name, https)
+    lab_like = settings.env_name not in ("STAGING", "PROD")
+    # SEC-124c: in a lab, "the caller is not on this machine" is the fact that matters —
+    # it implies a proxy, which implies the browser may be cross-site. Relying on the
+    # scheme alone breaks whenever a preview proxy omits X-Forwarded-Proto.
+    remote = security.reached_through_a_proxy(request.headers) or \
+        not security.is_loopback_host(request.headers.get("host"))
+    https = scheme == "https" or (lab_like and remote)
+    cookie_kwargs, expose_token = security.session_cookie_policy(
+        settings.env_name, https, settings.cookie_secure)
     response.set_cookie(security.COOKIE_NAME, token,
                         max_age=security.token_ttl_seconds(), **cookie_kwargs)
     body: dict = {"user": security.user_public(user)}

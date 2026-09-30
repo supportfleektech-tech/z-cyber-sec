@@ -21,6 +21,11 @@ def _bool(name: str, default: bool = False) -> bool:
 @dataclass
 class Settings:
     env_name: str = "LOCAL"
+    # SEC-124c: cookie transport, resolved by security.session_cookie_policy.
+    # auto   — https when the request says so (X-Forwarded-Proto) or the caller is remote
+    # always — force Secure + SameSite=None (proxy that strips X-Forwarded-Proto)
+    # never  — force SameSite=Strict without Secure (plain-HTTP lab over the LAN)
+    cookie_secure: str = "auto"
     port: int = 8080
     data_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
     secret_key: str = "dev-only-change-me-in-staging"

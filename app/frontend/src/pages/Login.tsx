@@ -7,6 +7,7 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [blocked, setBlocked] = useState(false);
   const navigate = useNavigate();
 
   const submit = async (e: FormEvent) => {
@@ -18,6 +19,16 @@ export default function Login() {
       // Preview/embedded contexts receive a token (SEC-124); production sends none and
       // the httpOnly cookie is the only transport.
       session.keep(res?.session_token);
+      // Prove the session survived before navigating: a browser that refuses cookies
+      // *and* storage would otherwise bounce straight back here from /overview with no
+      // explanation (SEC-124c).
+      try {
+        await api.get("/api/auth/me");
+      } catch {
+        setBlocked(true);
+        return;
+      }
+      if (session.volatileOnly()) setBlocked(true);
       navigate("/overview");
     } catch (err) {
       setError((err as Error).message);
@@ -32,6 +43,25 @@ export default function Login() {
         <h1>🛡 CYBER-SEC</h1>
         <div className="sub">Security operations console — local lab (synthetic data)</div>
         {error && <div className="error-box">{error}</div>}
+        {blocked && (
+          <div className="error-box">
+            <b>Signed in, but this browser kept no session.</b>
+            <div className="mt">
+              The page is embedded, and this browser blocks cookies and storage for
+              embedded pages. Open the console in its own tab — the session then works
+              normally.
+            </div>
+            <div className="mt">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => window.open(window.location.href, "_blank", "noopener")}
+              >
+                Open in a new tab
+              </button>
+            </div>
+          </div>
+        )}
         <label className="f" htmlFor="u">Username</label>
         <input id="u" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
         <label className="f" htmlFor="p">Password</label>

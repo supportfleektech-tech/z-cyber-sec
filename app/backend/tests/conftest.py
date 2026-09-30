@@ -66,7 +66,11 @@ def client(conn):
         _run_detections(conn, events, threshold_context=events)
     from app.seed.seed_demo import demo_case_and_evidence
     demo_case_and_evidence(conn)
-    c = TestClient(app)
+    # A loopback base URL: the suite acts as a client on this machine, which is what the
+    # default `testserver` host would otherwise not be — and since SEC-124c a non-loopback
+    # host over plain HTTP legitimately receives a `Secure` cookie that the client then
+    # refuses to send. Being explicit here keeps every other test meaningful.
+    c = TestClient(app, base_url="http://127.0.0.1:8080")
     r = _login(c, "admin", "CyberSecAdmin1!")
     assert r.status_code == 200, r.text
     yield c

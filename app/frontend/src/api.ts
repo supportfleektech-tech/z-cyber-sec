@@ -21,18 +21,41 @@ export class ApiError extends Error {
 
 const TOKEN_KEY = "cybersec_session";
 
+// SEC-124c: a browser can refuse every place we might keep the token — `localStorage` and
+// `sessionStorage` throw in a sandboxed frame, and cookies are dropped when the app is a
+// third party. The memory fallback is the one that always works, so a login survives
+// navigation within the page even when storage is denied (a reload then costs one login).
+let memoryToken: string | null = null;
+
 /** The bearer token for preview/embedded contexts (SEC-124); no-op in production. */
 export const session = {
   token: () => {
-    try { return window.sessionStorage.getItem(TOKEN_KEY); } catch { return null; }
+    if (memoryToken) return memoryToken;
+    for (const store of [() => window.localStorage, () => window.sessionStorage]) {
+      try {
+        const found = store().getItem(TOKEN_KEY);
+        if (found) return found;
+      } catch { /* blocked; try the next one */ }
+    }
+    return null;
   },
   keep: (token: string | undefined) => {
-    try {
-      if (token) window.sessionStorage.setItem(TOKEN_KEY, token);
-    } catch { /* storage blocked; the cookie is the only transport */ }
+    if (!token) return;
+    memoryToken = token;
+    for (const store of [() => window.localStorage, () => window.sessionStorage]) {
+      try { store().setItem(TOKEN_KEY, token); } catch { /* blocked; memory holds it */ }
+    }
   },
   clear: () => {
-    try { window.sessionStorage.removeItem(TOKEN_KEY); } catch { /* nothing to clear */ }
+    memoryToken = null;
+    for (const store of [() => window.localStorage, () => window.sessionStorage]) {
+      try { store().removeItem(TOKEN_KEY); } catch { /* nothing to clear */ }
+    }
+  },
+  /** True when the token only exists in memory — i.e. storage was refused. */
+  volatileOnly: () => {
+    if (!memoryToken) return false;
+    try { return window.sessionStorage.getItem(TOKEN_KEY) !== memoryToken; } catch { return true; }
   },
 };
 
@@ -43,7 +66,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, {
     method,
-    credentials: "same-origin",
+    // SEC-124c: "include" behaves exactly like "same-origin" for same-origin requests and
+    // additionally carries (and accepts) the session cookie when the app is embedded
+    // cross-origin — the case a preview creates. `same-origin` there would silently drop
+    // the Set-Cookie from a successful login.
+    credentials: "include",
     headers,
     body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
   });

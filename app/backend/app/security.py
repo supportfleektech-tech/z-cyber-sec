@@ -36,7 +36,8 @@ ROLES = {"admin", "ir_lead", "soc_analyst", "viewer", "agent_service"}
 LAB_LIKE_ENVS = ("LOCAL", "LAB")
 
 
-def session_cookie_policy(env_name: str, https: bool) -> tuple[dict, bool]:
+def session_cookie_policy(env_name: str, https: bool,
+                          secure_mode: str = "auto") -> tuple[dict, bool]:
     """Cookie attributes for this request, and whether the token may ride the login body.
 
     Returns `(set_cookie_kwargs, expose_token)`.
@@ -44,15 +45,47 @@ def session_cookie_policy(env_name: str, https: bool) -> tuple[dict, bool]:
     * STAGING/PROD — `SameSite=Strict`, `Secure` over HTTPS, never exposed in the body.
       These deployments are top-level, never framed, and their sessions stay
       httpOnly-only.
-    * LAB-like (LOCAL/LAB) over HTTPS — `SameSite=None; Secure`, token also returned, so
-      an embedded preview (cross-site) can hold a session at all.
-    * LAB-like over plain HTTP (loopback) — `SameSite=Strict`; `None` without `Secure`
-      is rejected by every browser, so it would be a broken cookie.
+    * LAB-like (LOCAL/LAB) for a non-local caller — `SameSite=None; Secure`, token also
+      returned, so an embedded preview (cross-site) can hold a session at all. "Non-local"
+      is decided by host/forwarded headers, not only by the scheme: a preview proxy that
+      forgets `X-Forwarded-Proto` would otherwise produce a `Strict` cookie that a
+      cross-site frame never sends — a login that succeeds and a session that does not.
+    * LAB-like for a local caller on plain HTTP — `SameSite=Strict`; `None` without
+      `Secure` is rejected by browsers, and a loopback caller is same-site anyway.
     """
     lab_like = env_name not in ("STAGING", "PROD")
+    # COOKIE_SECURE lets an operator settle the one question the app cannot answer by
+    # itself — whether the browser's connection is TLS: `always` for a proxy that strips
+    # X-Forwarded-Proto, `never` for a plain-HTTP lab reached over the LAN (a Secure
+    # cookie over plain http is dropped by the browser, which looks exactly like a
+    # failed login). STAGING/PROD ignore the knob: they never relax.
+    if lab_like:
+        if secure_mode == "always":
+            return ({"httponly": True, "samesite": "none", "secure": True, "path": "/"}, True)
+        if secure_mode == "never":
+            return ({"httponly": True, "samesite": "strict", "secure": False, "path": "/"}, True)
     if lab_like and https:
         return ({"httponly": True, "samesite": "none", "secure": True, "path": "/"}, True)
     return ({"httponly": True, "samesite": "strict", "secure": https, "path": "/"}, lab_like)
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """True when the client reached this process directly on the machine's loopback.
+
+    Handles `host:port`, bracketed IPv6 (`[::1]:8080`) and bare names.
+    """
+    name = (host or "").strip().lower()
+    if name.startswith("["):                       # [::1]:8080 / [::1]
+        name = name[1:].split("]", 1)[0]
+    elif name.count(":") == 1:                     # 127.0.0.1:8080
+        name = name.split(":", 1)[0]
+    return name in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or name.startswith("127.")
+
+
+def reached_through_a_proxy(headers) -> bool:
+    """Any forwarded-for/real-ip hop means an external client is on the other end."""
+    return bool(headers.get("x-forwarded-for") or headers.get("x-real-ip")
+                or headers.get("x-forwarded-host"))
 
 
 def effective_scheme(url_scheme: str, forwarded_proto: str | None) -> str:

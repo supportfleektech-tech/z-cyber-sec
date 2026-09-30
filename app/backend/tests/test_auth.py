@@ -153,22 +153,30 @@ def test_session_transport_policy_is_scoped_to_lab_environments():
     assert effective_scheme("http", "banana") == "http"
 
 
-def test_login_cookie_attributes_follow_the_forwarded_scheme(client):
-    """Behind the preview proxy the app sees `http`; without honouring
-    X-Forwarded-Proto the cookie would be set same-site and non-secure, and the
-    session would never survive in the browser."""
-    client.post("/api/auth/logout")
-    r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"})
-    assert r.status_code == 200
-    plain = r.headers["set-cookie"]
-    assert "SameSite=strict" in plain and "Secure" not in plain
+def test_login_cookie_attributes_follow_the_transport(client):
+    """The cookie must match how the *browser* reaches the app, and the app has three
+    signals for that: `X-Forwarded-Proto`, whether the seen Host is loopback, and the
+    COOKIE_SECURE override (SEC-124c)."""
+    from app.config import settings
 
-    r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"},
-                    headers={"x-forwarded-proto": "https"})
-    assert r.status_code == 200
-    proxied = r.headers["set-cookie"]
-    assert "SameSite=none" in proxied and "Secure" in proxied
-    assert "HttpOnly" in proxied
+    client.post("/api/auth/logout")
+    proxied = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"},
+                          headers={"x-forwarded-proto": "https"}).headers["set-cookie"]
+    assert "SameSite=none" in proxied and "Secure" in proxied and "HttpOnly" in proxied
+
+    local = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"},
+                        headers={"host": "127.0.0.1:8080"}).headers["set-cookie"]
+    assert "SameSite=strict" in local and "Secure" not in local
+
+    # A proxy that strips X-Forwarded-Proto: the operator says "TLS is in front".
+    settings.cookie_secure = "always"
+    try:
+        forced = client.post("/api/auth/login",
+                             json={"username": "admin", "password": "CyberSecAdmin1!"},
+                             headers={"host": "127.0.0.1:8080"}).headers["set-cookie"]
+        assert "SameSite=none" in forced and "Secure" in forced
+    finally:
+        settings.cookie_secure = "auto"
 
 
 def test_bearer_token_authenticates_the_same_session(client):
@@ -207,3 +215,41 @@ def test_bearer_token_obeys_rbac_and_revocation(client):
 
     client.post("/api/auth/logout", headers=auth)
     assert client.get("/api/auth/me", headers=auth).status_code == 401
+
+
+def test_preview_host_gets_a_cross_site_cookie_even_without_forwarded_proto(client):
+    """SEC-124c: the preview proxy may omit X-Forwarded-Proto. Deciding the cookie from
+    the scheme alone then produced `SameSite=Strict` for a browser that is cross-site —
+    a login that succeeds and a session the browser never sends. A non-loopback Host (or
+    any forwarded header) must be enough to select the cross-site cookie."""
+    from app.security import is_loopback_host, reached_through_a_proxy
+
+    assert is_loopback_host("127.0.0.1:8080") and is_loopback_host("localhost:8080")
+    assert is_loopback_host("[::1]:8080") and not is_loopback_host("8080-abc.e2b.app")
+
+    class H(dict):
+        pass
+
+    assert not reached_through_a_proxy(H())
+    assert reached_through_a_proxy(H({"x-forwarded-for": "10.0.0.9"}))
+    assert reached_through_a_proxy(H({"x-real-ip": "10.0.0.9"}))
+
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/login",
+                    json={"username": "admin", "password": "CyberSecAdmin1!"},
+                    headers={"host": "8080-abc.e2b.app"})          # no X-Forwarded-Proto
+    assert r.status_code == 200
+    assert "SameSite=none" in r.headers["set-cookie"] and "Secure" in r.headers["set-cookie"]
+    # and the body still carries the bearer fallback for browsers that drop the cookie
+    assert r.json()["session_token"]
+
+
+def test_local_loopback_login_keeps_a_same_site_cookie(client):
+    """The local lab (plain http on loopback) must keep working: `SameSite=None` without
+    `Secure` is rejected by browsers, and a loopback caller is same-site anyway."""
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "CyberSecAdmin1!"},
+                    headers={"host": "127.0.0.1:8080"})
+    assert r.status_code == 200
+    cookie = r.headers["set-cookie"]
+    assert "SameSite=strict" in cookie and "Secure" not in cookie

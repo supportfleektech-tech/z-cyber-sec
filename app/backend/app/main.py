@@ -5,6 +5,7 @@ Run:  .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8080
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from .routers import (
     tradecraft,
     vulns,
 )
+from .security import COOKIE_NAME
 
 API_ROUTERS = [
     overview.router, auth.router, soc.router, cases.router, intel.router, vulns.router,
@@ -75,7 +77,14 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.dev_origin] if settings.dev_origin else [],
+        # SEC-124c: an embedded preview may make the app cross-origin. STAGING/PROD allow
+        # only the configured dev origin; lab-like environments reflect whatever origin
+        # the preview uses (including `null` from a sandboxed frame), because the whole
+        # point of a lab is that it can be looked at from somewhere else. Credentials are
+        # on, so the session cookie travels and is accepted when the request is cross-site.
+        allow_origins=[settings.dev_origin] if settings.dev_origin and
+        settings.env_name in ("STAGING", "PROD") else [],
+        allow_origin_regex=None if settings.env_name in ("STAGING", "PROD") else ".*",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -173,6 +182,38 @@ def create_app() -> FastAPI:
         if request.url.scheme == "https":
             response.headers.setdefault("Strict-Transport-Security",
                                         "max-age=31536000; includeSubDomains")
+        return response
+
+    @app.middleware("http")
+    async def auth_transport_log(request: Request, call_next):
+        """Log what the browser actually sent on the auth surface (SEC-124c).
+
+        A session that dies between `POST /login` and `GET /me` is a browser-policy
+        question — cookie storage, third-party blocking, `SameSite`, an embedded frame —
+        and the access log alone cannot tell the difference between "the cookie was
+        refused" and "the client never sent it". This prints the headers that decide it.
+        Lab-like environments only.
+        """
+        response = await call_next(request)
+        if settings.env_name in ("LOCAL", "LAB") and request.url.path.startswith("/api/auth/"):
+            log = logging.getLogger("uvicorn.error")
+            # Attributes only: the Set-Cookie value is the session token and is never logged.
+            set_cookie = response.headers.get("set-cookie") or ""
+            attrs = ";".join(part.strip() for part in set_cookie.split(";")[1:]) or "-"
+            log.info(
+                "auth-transport %s %s -> %s | host=%s xfp=%s xff=%s | fetch-site=%s mode=%s "
+                "origin=%s | cookie=%s bearer=%s | set-cookie[%s]",
+                request.method, request.url.path, response.status_code,
+                request.headers.get("host", "-"),
+                request.headers.get("x-forwarded-proto", "-"),
+                request.headers.get("x-forwarded-for", "-"),
+                request.headers.get("sec-fetch-site", "-"),
+                request.headers.get("sec-fetch-mode", "-"),
+                request.headers.get("origin", "-"),
+                "yes" if request.cookies.get(COOKIE_NAME) else "no",
+                "yes" if (request.headers.get("authorization") or "")[:7].lower() == "bearer " else "no",
+                attrs,
+            )
         return response
 
     for r in API_ROUTERS:
