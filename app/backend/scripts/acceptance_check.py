@@ -141,7 +141,9 @@ def clause_core_flows(client: Client, rep: Report) -> None:
             bad.append(name)
     rep.add("core flows pass", FAIL if bad else PASS,
             {"probes": answers, "unreachable": bad} if bad else {"probes": answers},
-            None if not bad else "python -m pytest -q  (the behavioural proof: 305 tests)")
+            # No test count here on purpose: a number in a tool drifts exactly like a
+            # number in a document, and this clause points at the suite, not a tally.
+            None if not bad else "python -m pytest -q  (behavioural proof: the full suite)")
 
 
 def clause_rbac(client: Client, rep: Report) -> None:
