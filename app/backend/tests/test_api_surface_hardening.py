@@ -392,15 +392,26 @@ def test_baseline_security_headers_are_set_in_the_application(client):
     """SEC-117: the hardening headers existed only in the Caddyfile, so any
     deployment without that edge (an internal operator host, a hand-started
     uvicorn, a staging stack behind another proxy) served the SPA with no framing,
-    MIME-sniffing or referrer policy at all."""
+    MIME-sniffing or referrer policy at all.
+
+    Framing is environment-scoped (SEC-124): the lab must be embeddable (a hosted
+    preview is a cross-site iframe, and `frame-ancestors 'none'` blanks it), while
+    STAGING/PROD refuse framing — pinned by the two CSP constants below.
+    """
+    from app import main as app_main
+    from app.config import settings
+
     r = client.get("/api/healthz")
     assert r.headers["X-Content-Type-Options"] == "nosniff"
-    assert r.headers["X-Frame-Options"] == "DENY"
     assert r.headers["Referrer-Policy"] == "no-referrer"
     csp = r.headers["Content-Security-Policy"]
-    assert "default-src 'self'" in csp and "frame-ancestors 'none'" in csp
-    assert "object-src 'none'" in csp
+    assert "default-src 'self'" in csp and "object-src 'none'" in csp
     assert "Permissions-Policy" in r.headers
+    assert settings.env_name in ("LOCAL", "LAB")            # this suite runs lab-like
+    assert "frame-ancestors" not in csp, "a preview iframe cannot render this"
+    assert "X-Frame-Options" not in r.headers
+    assert "frame-ancestors" not in app_main._CSP_FRAMED
+    assert "frame-ancestors 'none'" in app_main._CSP_NO_FRAMING
     # HSTS would pin a browser to https for the loopback preview host, so it is
     # sent only when the request actually arrived over TLS.
     assert "Strict-Transport-Security" not in r.headers

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { api } from "./api";
+import { api, session } from "./api";
 import { useApi } from "./components";
 import Login from "./pages/Login";
 import Overview from "./pages/Overview";
@@ -91,6 +91,7 @@ function TopBar() {
           onClick={async () => {
             try {
               await api.post("/api/auth/logout");
+              session.clear();
             } finally {
               navigate("/login");
             }

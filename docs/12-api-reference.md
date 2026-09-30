@@ -563,6 +563,29 @@ that will fail), `running_but_not_authorized` (scope drift), and
 registered). `other_authorized_targets` lists authorizations that are legitimately
 *not* containers (mailboxes, vendor hosts) and does not affect `ok`.
 
+## Sessions (SEC-124)
+
+Login sets an httpOnly cookie **and**, in LOCAL/LAB, returns the same opaque token in the
+body as `session_token`. The SPA keeps that token in `sessionStorage` and sends it as
+`Authorization: Bearer <token>`; the API accepts either transport for the same
+server-side session, so RBAC, expiry and revocation are identical.
+
+Why both: a preview/embedded context is cross-site, where a `SameSite=Strict` cookie is
+never sent (login succeeds, every later call is 401), and browsers with third-party
+cookie blocking drop even `SameSite=None` ones. A bearer token survives any cookie
+policy. The scoping is deliberate:
+
+| Environment | Cookie | Token in body | Framing |
+|---|---|---|---|
+| LOCAL / LAB, HTTPS (proxied) | `SameSite=None; Secure` | yes | allowed |
+| LOCAL / LAB, plain HTTP (loopback) | `SameSite=Strict` (no `Secure`) | yes | allowed |
+| STAGING / PROD, HTTPS | `SameSite=Strict; Secure` | **no** | denied |
+
+Cookie attributes follow the scheme the *browser* used (`X-Forwarded-Proto`), not the
+app's own view: behind a TLS-terminating proxy the app sees `http` while the browser
+needs a `Secure` cookie. Logout revokes the session server-side and the SPA clears the
+stored token.
+
 ## Operations
 
 `GET /api/admin/doctor` (admin `audit.read`) — one read-only verdict over migrations,
@@ -571,10 +594,15 @@ permissions, environment guards, the lab-range cross-check and the agent invento
 Each check carries the values behind it and a `fix_hint` naming the action; the
 response has `verdict`, `summary` and `checks[]` (SEC-116).
 
-Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
-`Referrer-Policy: no-referrer`, a tight `Content-Security-Policy` and
-`Permissions-Policy`; `Strict-Transport-Security` is added when the request arrived
-over TLS. The Caddy edge sets its own copies and can override these (SEC-117).
+Every response carries `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+no-referrer`, a tight `Content-Security-Policy` and `Permissions-Policy`;
+`Strict-Transport-Security` is added when the request arrived over TLS. The Caddy edge
+sets its own copies and can override these (SEC-117).
+
+Framing is environment-scoped (SEC-124): **STAGING/PROD** send `X-Frame-Options: DENY`
+and `frame-ancestors 'none'`; **LOCAL/LAB** omit both, because a hosted preview renders
+this app inside another page's iframe and refusal blanks it. The table is the difference
+between "the lab works" and "the lab is a blank rectangle".
 
 ## Error code catalogue (common)
 

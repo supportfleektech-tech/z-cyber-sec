@@ -49,9 +49,18 @@ API_ROUTERS = [
 # tight — no inline scripts, no external origins, no framing. `style-src
 # 'unsafe-inline'` is required by the bundled component styles (a nonce would mean
 # rewriting the build); everything else is `'self'`.
-_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
-        "object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+_CSP_COMMON = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+               "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+               "object-src 'none'; base-uri 'self'; form-action 'self'")
+# SEC-124: STAGING/PROD refuse framing outright. A lab-like environment must allow it:
+# a hosted preview shows this app inside someone else's page, and `frame-ancestors 'none'`
+# (or X-Frame-Options: DENY) blanks that preview — the app then "does not work" for the
+# only person looking at it. The CSP for lab-like environments simply omits the directive.
+# Lab-like: no frame-ancestors directive at all — the ancestor is the preview host, not
+# this app, so any listed value ('self', a scheme) would still blank the preview.
+# STAGING/PROD: refused outright.
+_CSP_FRAMED = _CSP_COMMON
+_CSP_NO_FRAMING = _CSP_COMMON + "; frame-ancestors 'none'"
 
 
 def create_app() -> FastAPI:
@@ -151,10 +160,13 @@ def create_app() -> FastAPI:
         # started by hand) otherwise serves the SPA with no framing, MIME-sniffing
         # or referrer policy at all. The edge may override these; it can no longer
         # be the only place they exist.
+        lab_like = settings.env_name not in ("STAGING", "PROD")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
+        if not lab_like:
+            response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
-        response.headers.setdefault("Content-Security-Policy", _CSP)
+        response.headers.setdefault("Content-Security-Policy",
+                                    _CSP_FRAMED if lab_like else _CSP_NO_FRAMING)
         response.headers.setdefault("Permissions-Policy",
                                     "geolocation=(), camera=(), microphone=(), payment=()")
         # HSTS is meaningful only over TLS: sending it from a plain-HTTP lab would

@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, session } from "../api";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -14,7 +14,10 @@ export default function Login() {
     setBusy(true);
     setError(null);
     try {
-      await api.post("/api/auth/login", { username, password });
+      const res = await api.post<{ session_token?: string }>("/api/auth/login", { username, password });
+      // Preview/embedded contexts receive a token (SEC-124); production sends none and
+      // the httpOnly cookie is the only transport.
+      session.keep(res?.session_token);
       navigate("/overview");
     } catch (err) {
       setError((err as Error).message);

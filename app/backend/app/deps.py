@@ -9,8 +9,27 @@ from . import db, security
 from .audit import record_audit
 
 
-def get_current_user(request: Request, conn: sqlite3.Connection = Depends(db.get_conn)) -> dict:
+def _request_token(request: Request) -> str | None:
+    """The session token, from the cookie or an `Authorization: Bearer` header (SEC-124).
+
+    Both carry the same opaque token to the same server-side session row, so RBAC,
+    expiry and revocation behave identically; only the transport differs. The header
+    path exists because a cross-site/embedded context silently drops `SameSite=Strict`
+    cookies, and third-party cookie blocking drops the rest — a bearer token survives
+    both. See `security.session_cookie_policy` for where the relaxation is scoped.
+    """
     token = request.cookies.get(security.COOKIE_NAME)
+    if token:
+        return token
+    header = request.headers.get("authorization") or ""
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        return value.strip()
+    return None
+
+
+def get_current_user(request: Request, conn: sqlite3.Connection = Depends(db.get_conn)) -> dict:
+    token = _request_token(request)
     session = security.get_session(conn, token)
     if not session:
         raise HTTPException(status_code=401, detail={"code": "unauthenticated", "message": "Login required."})

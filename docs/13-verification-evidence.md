@@ -863,11 +863,11 @@ longer skips its existence check, and the constraint net answers documented code
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
 never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
 and timestamps are validated, and the import always reports the run's status),
-300 → 317 (17 new: the lab range registry and its cross-checks ×2, the operator
+300 → 321 (22 new: the lab range registry and its cross-checks ×2, the operator
 self-diagnosis, the baseline security headers, and the doctor's access rule split out),
 ruff clean.
 
-**Current totals:** **317 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **321 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
 SEC-117 series was reproduced first (as a failing check or a live request) and
@@ -2025,3 +2025,58 @@ Verified by mutation rather than by inspection: renaming `/api/lab/coverage` to
 `/api/lab/coverageX` in `Lab.tsx` fails the test with
 `Lab.tsx: api.get('/api/lab/coverageX')`; restoring the file passes it again. 91 calls
 checked against 67 GET / 51 POST / 15 PATCH / 2 DELETE routes.
+
+#### SEC-124 — login worked and then "wasn't logged in": the preview could not keep a session
+
+Reported from the browser, not the API: entering the documented credentials showed the
+form fail and retry, and the server log showed exactly what was happening —
+
+```
+POST /api/auth/login 401        (typo)
+POST /api/auth/login 401        (typo)
+POST /api/auth/login 200 OK     (accepted, Set-Cookie sent)
+GET  /api/auth/me    401        (not authenticated)
+```
+
+The password was right and the session existed; the **browser never stored the cookie**.
+Two properties of the app caused it, both correct for a top-level production app and
+fatal in a hosted preview:
+
+- the session cookie was `SameSite=Strict`, and a preview/embedded context is cross-site,
+  where browsers do not send (and cookies-with-third-party-blocking do not even store)
+  it;
+- `X-Frame-Options: DENY` + `frame-ancestors 'none'` (SEC-117) refuse to render in an
+  iframe at all — a preview that embeds the app would be blank.
+
+Note what the ten previous live verifications could not catch: every one of them used
+`curl`/urllib with a cookie jar, which applies no SameSite, no third-party and no framing
+policy. The API was always right; the *browser* was the untested component.
+
+**Fixed (scoped, not weakened):**
+
+- `security.session_cookie_policy(env, https)` decides the transport in one place.
+  LOCAL/LAB: `SameSite=None; Secure` over HTTPS (and the same opaque token returned in
+  the login body as `session_token`); plain HTTP keeps `Strict` + no `Secure`, because
+  `None` without `Secure` is a cookie no browser accepts. STAGING/PROD: `Strict`,
+  `Secure`, **no token in the body** — unchanged.
+- Cookie attributes now follow the scheme the *browser* used
+  (`security.effective_scheme` reads `X-Forwarded-Proto`), not the app's own view: behind
+  the TLS-terminating preview proxy the app sees `http`, so without this the cookie was
+  neither `Secure` nor cross-site-capable.
+- The SPA sends the token as `Authorization: Bearer` (kept in `sessionStorage`, cleared
+  on logout and on 401); `deps.get_current_user` accepts the cookie **or** the header for
+  the same server-side session, so RBAC, expiry and revocation are identical. Verified:
+  a viewer's bearer token gets 403 on a write and is dead 401 after logout.
+- Framing is environment-scoped: LOCAL/LAB omit `X-Frame-Options` and `frame-ancestors`
+  entirely (the ancestor is the preview host, so any listed value would still blank it);
+  STAGING/PROD keep `DENY` + `'none'`, pinned by the two CSP constants in `app/main.py`.
+
+**Live (seeded instance, proxied-HTTPS request):** `Set-Cookie: … SameSite=none; Secure`;
+the body carries `session_token`; `GET /api/auth/me` with **only** `Authorization: Bearer`
+answers 200 with the full permission list; a bad token answers 401; responses carry no
+`X-Frame-Options` and no `frame-ancestors`. Rebuilt SPA serves the token logic
+(`assets/index-CXgNAD39.js`). Smoke 214 checks / 0 failures, acceptance 10/2/0 again.
+
+Tests: 317 → 321 (transport policy, forwarded-scheme cookie attributes, bearer
+authentication, bearer RBAC + revocation; and the SEC-117 header test updated to the
+environment-scoped policy), ruff clean.

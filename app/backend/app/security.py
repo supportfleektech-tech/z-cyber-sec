@@ -2,7 +2,17 @@
 
 ADR-002: application-managed auth (local-first, no external IdP).
 - PBKDF2-HMAC-SHA256, 390k iterations (OWASP 2023 minimum), 16-byte salt — stdlib only.
-- Opaque bearer sessions in httpOnly SameSite=Strict cookies; DB stores token hash only.
+- Opaque bearer sessions; the DB stores only the token's hash.
+- Transport (SEC-124): an httpOnly `SameSite=Strict` cookie by default, and the *same*
+  opaque token may also travel as `Authorization: Bearer` — the SPA keeps it in
+  sessionStorage. Two reasons this exists, both about where the app runs:
+    * a preview/embedded context is cross-site, so a `Strict` cookie is simply not sent
+      (login succeeds, every later call is 401);
+    * browsers with third-party cookie blocking drop even `SameSite=None` cookies.
+  A bearer token works under any cookie policy. The relaxation is scoped: outside
+  STAGING/PROD the login body also returns the token, the cookie drops to
+  `SameSite=None` when the request arrived over HTTPS, and the app may be framed.
+  STAGING/PROD keep `SameSite=Strict`, no token in the body, and framing denied.
 - RBAC is enforced server-side in deps.require(); the UI never grants access.
 """
 from __future__ import annotations
@@ -19,6 +29,44 @@ COOKIE_NAME = "cybersec_token"
 TOKEN_BYTES = 32
 
 ROLES = {"admin", "ir_lead", "soc_analyst", "viewer", "agent_service"}
+
+
+# ------------------------------------------------------------- session policy
+
+LAB_LIKE_ENVS = ("LOCAL", "LAB")
+
+
+def session_cookie_policy(env_name: str, https: bool) -> tuple[dict, bool]:
+    """Cookie attributes for this request, and whether the token may ride the login body.
+
+    Returns `(set_cookie_kwargs, expose_token)`.
+
+    * STAGING/PROD — `SameSite=Strict`, `Secure` over HTTPS, never exposed in the body.
+      These deployments are top-level, never framed, and their sessions stay
+      httpOnly-only.
+    * LAB-like (LOCAL/LAB) over HTTPS — `SameSite=None; Secure`, token also returned, so
+      an embedded preview (cross-site) can hold a session at all.
+    * LAB-like over plain HTTP (loopback) — `SameSite=Strict`; `None` without `Secure`
+      is rejected by every browser, so it would be a broken cookie.
+    """
+    lab_like = env_name not in ("STAGING", "PROD")
+    if lab_like and https:
+        return ({"httponly": True, "samesite": "none", "secure": True, "path": "/"}, True)
+    return ({"httponly": True, "samesite": "strict", "secure": https, "path": "/"}, lab_like)
+
+
+def effective_scheme(url_scheme: str, forwarded_proto: str | None) -> str:
+    """The scheme *the browser* used, which is what cookie attributes must match.
+
+    A reverse proxy terminates TLS, so the app sees `http` while the browser is on
+    `https`; a `Secure` cookie is correct in that case. Without this, every preview
+    deployment sets same-site, non-secure cookies and the session cannot survive.
+    """
+    if forwarded_proto:
+        first = forwarded_proto.split(",")[0].strip().lower()
+        if first in ("http", "https"):
+            return first
+    return url_scheme
 
 
 # ---------------------------------------------------------------- passwords

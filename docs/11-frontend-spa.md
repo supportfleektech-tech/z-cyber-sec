@@ -73,3 +73,11 @@ yet".
 ## Vocabulary parity (SEC-079)
 
 Every picker that sends a status, kind, severity or role value must offer exactly what the API accepts. `tests/test_enum_parity.py` reads the page sources and compares each named list with the API's allowed set, failing CI with a two-way diff — a UI that offers a value the API rejects (and hides one it accepts) is a defect that presents as a backend error to the person using it.
+
+## Session transport (SEC-124)
+
+`api.ts` sends `credentials: "same-origin"` (the httpOnly cookie) and, when a token is
+present, `Authorization: Bearer`. The token comes from the login response and lives in
+`sessionStorage`; it is cleared on logout and on any 401. This exists so the SPA works
+inside a hosted preview iframe, where cookies are cross-site and dropped. Production
+returns no token, so its sessions remain httpOnly-only (docs/12).

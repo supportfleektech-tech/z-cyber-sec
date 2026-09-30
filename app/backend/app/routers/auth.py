@@ -59,11 +59,22 @@ def login(body: LoginIn, request: Request, response: Response,
         request.headers.get("user-agent"))
     record_audit(conn, {"type": "user", "id": str(user["id"]), "name": user["username"]},
                  "auth.login", target_type="session", target_id=str(session_id))
-    response.set_cookie(
-        security.COOKIE_NAME, token, max_age=security.token_ttl_seconds(),
-        httponly=True, samesite="strict", secure=request.url.scheme == "https",
-    )
-    return {"user": security.user_public(user)}
+    # SEC-124: the cookie's attributes must match the scheme the *browser* used (a
+    # proxy terminates TLS, so the app itself sees http), and in a lab-like environment
+    # the same token is also returned in the body for the SPA to carry as a bearer
+    # token — an embedded preview cannot rely on cookies at all.
+    scheme = security.effective_scheme(request.url.scheme,
+                                       request.headers.get("x-forwarded-proto"))
+    https = scheme == "https"
+    cookie_kwargs, expose_token = security.session_cookie_policy(settings.env_name, https)
+    response.set_cookie(security.COOKIE_NAME, token,
+                        max_age=security.token_ttl_seconds(), **cookie_kwargs)
+    body: dict = {"user": security.user_public(user)}
+    if expose_token:
+        body["session_token"] = token
+        body["session_transport"] = "cookie+bearer (lab mode: the token in this body is " \
+                                    "for the SPA's Authorization header)"
+    return body
 
 
 @router.post("/logout")
