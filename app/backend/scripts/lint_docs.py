@@ -27,6 +27,13 @@ NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, 
 # Files exempt from "current value" checks: they are dated logs, not status pages.
 HISTORICAL = {"13-verification-evidence.md"}
 
+# Generated/runtime paths a document may legitimately mention: they exist on a working
+# host (a virtualenv, a built SPA, a test data dir) and never in a clean checkout, which
+# is exactly where this script also has to pass — CI. Checked: the first CI run of this
+# very lint failed on `.venv` and `.testdata`.
+GENERATED = (".venv", "node_modules", "dist/", "/dist", ".testdata", "__pycache__",
+             ".pytest_cache", "data/", "/data", "cybersec.db", ".tar.gz", ".log")
+
 
 class Checker:
     def __init__(self) -> None:
@@ -82,6 +89,8 @@ def main() -> int:
     for name, text in doc_text.items():
         for rel in set(path_re.findall(text)):
             if any(ch in rel for ch in "*<>") or rel.endswith(("/",)):
+                continue
+            if any(marker in rel for marker in GENERATED):
                 continue
             c.expect(resolves(rel), f"docs/{name} references missing path {rel}")
     for name, text in doc_text.items():

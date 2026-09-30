@@ -1961,6 +1961,13 @@ page** (15 of 16 pages documented), **`0004_tradecraft.sql` was documented nowhe
 `docs/18-final-status.md` was not in the README index. All three are fixed; docs/04 also
 gained a migration table so the next migration has an obvious home.
 
+Its own first CI run failed, and that failure was the check working: on the build host
+`app/backend/.venv` and `tests/.testdata` exist, so nothing noticed that docs/13 mentions
+them; in a clean checkout they do not, and the lint flagged both. Generated and runtime
+paths a document may legitimately name (virtualenv, `node_modules`, `dist/`, `data/`,
+`.testdata`, caches) are now excluded — reproduced by running the lint against a fresh
+clone of the commit CI had, which is the only reason to trust that check's green.
+
 #### SEC-122 — a zero retention window was obeyed as "destroy immediately"
 
 Found by running the last loose end from the SEC-112 hunt (`0d`, `1y `) against the live
