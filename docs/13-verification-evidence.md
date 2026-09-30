@@ -1864,6 +1864,8 @@ a command, printing `pass` (with the values behind it), `host-ops` (with the exa
 to run on the target host — the sandbox cannot apply nftables or deploy to a clean target)
 or `fail`, and exiting non-zero only for `fail`. It also records the tested database's
 sha256 and row counts, so a release decision names the exact dataset the report describes.
+It carries **no test count** on purpose: a number inside a tool drifts exactly like a number
+inside a document (this one said "305 tests" by the time the suite was at 317).
 
 Against the seeded install: **10 demonstrated · 2 host-ops · 0 failed** —
 env/version recorded (LOCAL, 1.0.0, last release v1.0.0 with the checklist hash), core
