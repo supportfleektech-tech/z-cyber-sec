@@ -202,7 +202,7 @@ def create_app() -> FastAPI:
             attrs = ";".join(part.strip() for part in set_cookie.split(";")[1:]) or "-"
             log.info(
                 "auth-transport %s %s -> %s | host=%s xfp=%s xff=%s | fetch-site=%s mode=%s "
-                "origin=%s | cookie=%s bearer=%s | set-cookie[%s]",
+                "origin=%s | cookie=%s bearer=%s sesshdr=%s | client-says=%s | set-cookie[%s]",
                 request.method, request.url.path, response.status_code,
                 request.headers.get("host", "-"),
                 request.headers.get("x-forwarded-proto", "-"),
@@ -212,6 +212,12 @@ def create_app() -> FastAPI:
                 request.headers.get("origin", "-"),
                 "yes" if request.cookies.get(COOKIE_NAME) else "no",
                 "yes" if (request.headers.get("authorization") or "")[:7].lower() == "bearer " else "no",
+                # Presence only: the value is the session token and is never logged.
+                "yes" if request.headers.get("x-session-token") else "no",
+                # What the page believes it attached (a marker, not a credential): if this
+                # says "attached" while both carriers read "no", an intermediary stripped
+                # them, and the log says so instead of leaving it to guesswork.
+                request.headers.get("x-auth-source", "-"),
                 attrs,
             )
         return response

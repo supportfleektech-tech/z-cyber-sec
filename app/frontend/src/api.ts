@@ -63,7 +63,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const headers: Record<string, string> = {};
   if (body !== undefined && !(body instanceof FormData)) headers["Content-Type"] = "application/json";
   const token = session.token();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (token) {
+    // Two carriers again (SEC-124d): `Authorization` is what every server expects, and
+    // `X-Session-Token` is the one intermediaries treat as opaque payload. Whichever
+    // survives the proxy path carries the session.
+    headers["Authorization"] = `Bearer ${token}`;
+    headers["X-Session-Token"] = token;
+  }
+  // A marker, never a credential: lets the server's transport log distinguish "the page
+  // sent nothing" from "the page sent it and something in between dropped it".
+  headers["X-Auth-Source"] = token ? "attached" : "none";
   const res = await fetch(path, {
     method,
     // SEC-124c: "include" behaves exactly like "same-origin" for same-origin requests and
@@ -188,6 +197,10 @@ export function storageAvailability() {
       }
     })(),
   };
+}
+
+export async function diagnose(stage: string, detail: Record<string, unknown>) {
+  await report(stage, detail);
 }
 
 async function report(stage: string, detail: Record<string, unknown>) {

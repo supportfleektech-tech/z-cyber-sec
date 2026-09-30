@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, login, session } from "../api";
+import { api, diagnose, login, session, storageAvailability } from "../api";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -24,7 +24,16 @@ export default function Login() {
       // explanation (SEC-124c).
       try {
         await api.get("/api/auth/me");
-      } catch {
+      } catch (err) {
+        // The session exists but this browser will not carry it. Report the shape of the
+        // failure — the token was held in memory and attached to the request — so the
+        // server log shows whether it was never sent or dropped on the way (SEC-124d).
+        void diagnose("post-login-me-failed", {
+          status: (err as { status?: number }).status ?? null,
+          attached: "authorization+x-session-token",
+          kept_in_memory: session.volatileOnly() ? "memory-only" : "memory+storage",
+          storage: storageAvailability(),
+        });
         setBlocked(true);
         return;
       }

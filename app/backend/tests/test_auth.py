@@ -302,3 +302,22 @@ def test_production_never_exposes_a_token(client):
         assert "SameSite=strict" in r.headers["set-cookie"]
     finally:
         settings.env_name = original
+
+
+def test_token_authenticates_from_either_header(client):
+    """SEC-124d: the session token is accepted on `Authorization` *and* on the custom
+    `X-Session-Token` header. Intermediaries treat `Authorization` as special — some
+    consume or strip it — and an embedded preview sits behind exactly such a proxy."""
+    token = client.post("/api/auth/login",
+                        json={"username": "admin", "password": "CyberSecAdmin1!"},
+                        headers={"host": "8080-abc.e2b.app"}).json()["session_token"]
+    client.cookies.clear()
+
+    custom = client.get("/api/auth/me", headers={"x-session-token": token})
+    assert custom.status_code == 200 and custom.json()["username"] == "admin"
+
+    standard = client.get("/api/auth/me", headers={"authorization": f"Bearer {token}"})
+    assert standard.status_code == 200
+
+    # The custom header carries no privilege of its own: a wrong token is still a 401.
+    assert client.get("/api/auth/me", headers={"x-session-token": "not-a-session"}).status_code == 401

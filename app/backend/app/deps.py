@@ -25,6 +25,13 @@ def _request_token(request: Request) -> str | None:
     scheme, _, value = header.partition(" ")
     if scheme.lower() == "bearer" and value.strip():
         return value.strip()
+    # SEC-124d: a second, custom carrier. The standard `Authorization` header is
+    # special to intermediaries — some proxies consume or strip it — and an embedded
+    # preview sits behind exactly such a proxy. The token is the same opaque value; the
+    # custom header exists only so a stripped `Authorization` cannot end the session.
+    custom = (request.headers.get("x-session-token") or "").strip()
+    if custom:
+        return custom
     return None
 
 
