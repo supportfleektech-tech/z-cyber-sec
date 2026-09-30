@@ -863,11 +863,11 @@ longer skips its existence check, and the constraint net answers documented code
 on cases) and 298 → 299 (1 new: an unreadable retention label is refused on upload and
 never counted as "within retention") 299 → 300 (1 new: a scan run's kind, status
 and timestamps are validated, and the import always reports the run's status),
-300 → 321 (22 new: the lab range registry and its cross-checks ×2, the operator
+300 → 322 (23 new: the lab range registry and its cross-checks ×2, the operator
 self-diagnosis, the baseline security headers, and the doctor's access rule split out),
 ruff clean.
 
-**Current totals:** **321 tests pass** (`pytest -q`, ~4 min), ruff clean,
+**Current totals:** **322 tests pass** (`pytest -q`, ~4 min), ruff clean,
 `scripts.lint_rules` 6/6 rules compile, frontend typecheck + build green
 (294.83 kB / 82.23 kB gzip), CI green on every push. Every fix in the SEC-073 →
 SEC-117 series was reproduced first (as a failing check or a live request) and
@@ -2077,6 +2077,18 @@ answers 200 with the full permission list; a bad token answers 401; responses ca
 `X-Frame-Options` and no `frame-ancestors`. Rebuilt SPA serves the token logic
 (`assets/index-CXgNAD39.js`). Smoke 214 checks / 0 failures, acceptance 10/2/0 again.
 
-Tests: 317 → 321 (transport policy, forwarded-scheme cookie attributes, bearer
-authentication, bearer RBAC + revocation; and the SEC-117 header test updated to the
-environment-scoped policy), ruff clean.
+Tests: 317 → 322 (transport policy, forwarded-scheme cookie attributes, bearer
+authentication, bearer RBAC + revocation, SPA cache rules; and the SEC-117 header test
+updated to the environment-scoped policy), ruff clean.
+
+**SEC-124b — the shell could be cached, and a missing asset answered with HTML.** Testing
+the fix in the browser exposed the next trap: the served `index.html` carried no cache
+headers, so a browser could keep the previous shell, which names the previous bundle — a
+fix deployed and a person testing the old app. The catch-all also returned `index.html`
+for *any* unmatched path, so a stale `/assets/index-<hash>.js` reference answered `200
+text/html` and the console showed a JavaScript syntax error instead of a 404. Now: the
+shell is `Cache-Control: no-cache` (revalidate; the hash in the bundle name makes a cached
+shell the only real hazard), `assets/*` is `public, max-age=31536000, immutable`,
+anything under `assets/` or with a file extension that is missing is a JSON `404`, and
+extension-less client routes still get the shell. Four assertions added to the hardening
+suite.

@@ -17,6 +17,7 @@ Three findings, all fixed and pinned by tests here:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -446,3 +447,31 @@ def test_doctor_is_privileged(viewer_client):
     `audit.read` like the rest of /api/admin."""
     r = viewer_client.get("/api/admin/doctor")
     assert r.status_code == 403 and r.json()["detail"]["code"] == "forbidden"
+
+
+def test_spa_serving_caches_the_bundle_not_the_shell(client):
+    """SEC-124b: after a rebuild, a cached `index.html` keeps the browser on the previous
+    bundle — the fix is deployed and the person testing it is looking at the old app.
+    The shell must revalidate; the content-hashed assets may be cached forever. And a
+    missing asset must 404 rather than fall back to the shell: HTML where JavaScript was
+    expected is a syntax error in the console, not an answer."""
+    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"   # app/frontend/dist
+    if not (dist / "index.html").exists():  # SPA not built in this checkout
+        pytest.skip("frontend/dist is absent; build the SPA to run this test")
+
+    shell = client.get("/")
+    assert shell.status_code == 200 and "text/html" in shell.headers["content-type"]
+    assert shell.headers["cache-control"] == "no-cache"
+
+    asset = next(iter((dist / "assets").glob("*.js")))
+    r = client.get(f"/assets/{asset.name}")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    missing = client.get("/assets/index-does-not-exist.js")
+    assert missing.status_code == 404
+    assert missing.headers["content-type"].startswith("application/json")
+
+    # A client-side route (no extension) still gets the shell, not a 404.
+    route = client.get("/some/client/route")
+    assert route.status_code == 200 and "text/html" in route.headers["content-type"]

@@ -12,7 +12,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .db import raw_connection
@@ -200,14 +199,31 @@ def create_app() -> FastAPI:
     # Health (no auth — designed for local probes; see flow matrix).
     dist: Path | None = settings.frontend_dist
     if dist and dist.exists() and (dist / "index.html").exists():
-        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="static-assets")
+        root = dist.resolve()
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str):
+            """Serve the built SPA, with the two caching rules that keep a preview honest.
+
+            `index.html` must revalidate: it names the content-hashed bundle, so a cached
+            copy keeps pointing at the previous build and the fix just deployed is the one
+            the browser does not load. The hashed assets under `assets/` can then be
+            cached hard — their names change with their contents.
+
+            A *missing* asset is a stale reference, not a client route: answering with
+            `index.html` (which the generic SPA fallback would do) hands the browser HTML
+            where it expects JavaScript, and the console shows a syntax error instead of a
+            clean 404. Only extension-less paths fall through to the shell.
+            """
             candidate = (dist / full_path).resolve()
-            if full_path and candidate.is_file() and str(candidate).startswith(str(dist.resolve())):
-                return FileResponse(candidate)
-            return FileResponse(dist / "index.html")
+            inside = str(candidate).startswith(str(root))
+            if full_path and inside and candidate.is_file():
+                cache = ("public, max-age=31536000, immutable"
+                         if full_path.startswith("assets/") else "no-cache")
+                return FileResponse(candidate, headers={"Cache-Control": cache})
+            if full_path.startswith("assets/") or "." in Path(full_path).name:
+                return JSONResponse(status_code=404, content={"detail": {"code": "not_found"}})
+            return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
     else:
         @app.get("/", include_in_schema=False)
         def root():

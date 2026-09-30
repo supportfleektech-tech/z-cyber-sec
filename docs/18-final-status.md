@@ -15,7 +15,7 @@ that produced it, and anything that could not be run here is marked **host-ops**
 | Question | Answer |
 |---|---|
 | Is there a working cyber-sec lab platform here? | **Yes** — `make lab`, then `make run`; UI at `http://localhost:8080` |
-| Is it complete against the plan's own scope? | **Yes for code**: 11 capability areas, 19 docs, 321 tests, 7 migrations, 5 CI jobs |
+| Is it complete against the plan's own scope? | **Yes for code**: 11 capability areas, 19 docs, 322 tests, 7 migrations, 5 CI jobs |
 | Is it production-deployed? | **No, deliberately** — production is a separate hardened deployment (ADR-007); nothing here has been exposed, and the acts that need a real host are listed in §5 |
 | Is anything broken that I know of? | No. Live smoke 214 checks / 0 failures, acceptance 10 demonstrated / 2 host-ops / 0 failed, doctor verdict `ok` |
 
@@ -26,7 +26,7 @@ that produced it, and anything that could not be run here is marked **host-ops**
 | Application (FastAPI modular monolith) | `app/backend/app/` — `main.py`, 15 routers, services, migrations 0001–0007 |
 | Frontend (React + TS + Vite, served by the backend) | `app/frontend/src/` — 16 pages incl. `pages/Lab.tsx`, `pages/Admin.tsx` |
 | Synthetic dataset (complete demo, one command) | `app/backend/app/seed/seed_demo.py` → `seed_full()` |
-| Tests | `app/backend/tests/` — 321 tests; `tests/test_lab_range_infra.py` pins the range's isolation rules |
+| Tests | `app/backend/tests/` — 322 tests; `tests/test_lab_range_infra.py` pins the range's isolation rules |
 | Operator tools | `app/backend/scripts/` — `smoke_check.py`, `acceptance_check.py`, `doctor_report.py`, `lint_rules.py`, `backup_rehearsal.py`, `load_test.py` |
 | One entry point | `Makefile` (`make help`) |
 | CI/CD | `.github/workflows/ci.yml` — secrets, backend, live, frontend, supply-chain |
@@ -53,7 +53,7 @@ that produced it, and anything that could not be run here is marked **host-ops**
 | # | Clause | Status | Evidence |
 |---|---|---|---|
 | 1 | Environment and version recorded | demonstrated | `/api/healthz` (`LOCAL`, `1.0.0`), `X-Environment`/`X-Data-Class` headers, release record v1.0.0 |
-| 2 | Core user flows pass automated tests | demonstrated | 321 tests; `acceptance_check` probes 12 module endpoints live |
+| 2 | Core user flows pass automated tests | demonstrated | 322 tests; `acceptance_check` probes 12 module endpoints live |
 | 3 | RBAC enforced server-side and tested | demonstrated | anonymous 401 on every route, viewer 403 on 14 consequential writes, per-role tests in `tests/` |
 | 4 | Lab-to-management prohibited paths shown blocked | **host-ops** | rules pinned by `tests/test_lab_range_infra.py` (internal network, loopback-only publishes); the nftables matrix is applied and validated on the target host: `sudo infra/network/validate_flows.sh` |
 | 5 | Integrations expose health, errors, provenance | demonstrated | 4 integrations with `status`/`last_run_at`/`last_status`/`provenance`; probe results recorded via `/api/admin/integrations/{id}/health` |
